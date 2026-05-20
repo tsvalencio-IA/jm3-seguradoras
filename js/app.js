@@ -10,7 +10,7 @@
   const { auth, secondaryAuth, db, ts, arrayUnion, emailIsAdmin } = window.JM.firebase;
   const cfg = window.JM_CONFIG || {};
   const SYSTEM_SIGNATURE = "Powered by thIAguinho Soluções Digitais";
-  const LOGIN_FLOW_VERSION = "jm-v17-fluxo-unico-financeiro-operacional";
+  const LOGIN_FLOW_VERSION = "jm-v17-1-custos-frota-combustivel";
   let trackerTimer = null;
   let trackerBusy = false;
 
@@ -262,6 +262,31 @@
     return /receber|pagar|pendente|faturar|aberto/.test(statusLower(value));
   }
 
+  function normalizeCostText(value) {
+    return statusLower(value).replace(/[^a-z0-9]+/g, " ").trim();
+  }
+
+  function isMaintenanceExpenseType(type, notes) {
+    const text = normalizeCostText(String(type || "") + " " + String(notes || ""));
+    return /manutenc|revis|oleo|pneu|freio|suspens|eletric|mecanica|motor|cambio|guincho|munck|plataforma|borrachar|peca|pecas/.test(text);
+  }
+
+  function isVehicleCostType(type, notes) {
+    const text = normalizeCostText(String(type || "") + " " + String(notes || ""));
+    return /combustivel|diesel|gasolina|etanol|arla|pedagio|estacionamento|lavagem|alimentacao|manutenc|revis|oleo|pneu|freio|suspens|eletric|borrachar|mecanica|motor|cambio|guincho|munck|plataforma|peca|pecas/.test(text);
+  }
+
+  function vehicleCostKind(type, notes) {
+    return isMaintenanceExpenseType(type, notes) ? "maintenance" : isVehicleCostType(type, notes) ? "operational" : "general";
+  }
+
+  function vehicleCostKindLabel(kind) {
+    if (kind === "maintenance") return "Manutenção";
+    if (kind === "operational") return "Operacional";
+    return "Geral";
+  }
+
+
   async function getDocData(collectionName, id, localCache) {
     if (!id) return null;
     if (localCache && localCache[id]) return localCache[id];
@@ -419,6 +444,11 @@
       callId: linked.callId || "",
       vehicleId,
       driverId,
+      costCenter: vehicleId ? "Frota" : "Operação",
+      vehicleCost: !!vehicleId,
+      vehicleCostKind: vehicleCostKind(expenseData.type, expenseData.notes),
+      vehicleCostCategory: expenseData.type || "Despesa motorista",
+      approvalStatus: "approved",
       customerId: linked.customerId || "",
       billingParty: linked.billingParty || "",
       insurance: linked.insurance || "",
@@ -438,6 +468,9 @@
       linkedCallId: linked.callId || "",
       linkedVehicleId: vehicleId,
       linkedDriverId: driverId,
+      vehicleCostRecorded: !!vehicleId,
+      vehicleCostKind: vehicleCostKind(expenseData.type, expenseData.notes),
+      vehicleCostCategory: expenseData.type || "Despesa motorista",
       customerId: linked.customerId || "",
       billingParty: linked.billingParty || "",
       protocol: linked.protocol || "",
@@ -454,7 +487,7 @@
       await recalculateCallFinancials(linked.callId);
     }
 
-    if (canManageFleet() && vehicleId && /manutenc|revis|óleo|oleo|pneu|freio|suspens|el[eé]tric/i.test(String(expenseData.type || "") + " " + String(expenseData.notes || ""))) {
+    if (canManageFleet() && vehicleId && isMaintenanceExpenseType(expenseData.type, expenseData.notes)) {
       const maintId = sourceDocId("expense", expenseId);
       await db.collection("maintenance").doc(maintId).set({
         sourceType: "driver_expense",
@@ -497,6 +530,10 @@
       amount,
       status: maintenanceData.status === "concluida" ? "Pago" : "Pendente",
       vehicleId: maintenanceData.vehicleId || "",
+      costCenter: maintenanceData.vehicleId ? "Frota" : "Operação",
+      vehicleCost: !!maintenanceData.vehicleId,
+      vehicleCostKind: "maintenance",
+      vehicleCostCategory: "Manutenção de frota",
       odometerKm: maintenanceData.odometerKm || "",
       updatedAt: now,
       updatedBy: state.user.uid
@@ -1165,6 +1202,7 @@
     renderIntegrationInbox();
     renderVehicles();
     renderMaintenance();
+    renderVehicleCostsLedger();
     renderTeam();
     if ($("driverCalls")) renderDriverPanel();
     renderFinance();
@@ -1748,9 +1786,12 @@ Rota: ${url}`;
       const vehicleTx = txs.filter((t) => t.vehicleId === v.id);
       const entrada = vehicleTx.filter((t) => t.type === "entrada").reduce((s, t) => s + Number(t.amount || 0), 0);
       const saida = vehicleTx.filter((t) => t.type === "saida").reduce((s, t) => s + Number(t.amount || 0), 0);
+      const operacional = vehicleTx.filter((t) => t.type === "saida" && (t.vehicleCostKind === "operational" || t.sourceType === "driver_expense") && t.vehicleCostKind !== "maintenance").reduce((s, t) => s + Number(t.amount || 0), 0);
+      const manutencaoFinanceira = vehicleTx.filter((t) => t.type === "saida" && (t.vehicleCostKind === "maintenance" || t.sourceType === "maintenance" || t.module === "maintenance")).reduce((s, t) => s + Number(t.amount || 0), 0);
       const manutencao = maint.filter((m) => m.vehicleId === v.id).reduce((s, m) => s + Number(m.cost || 0), 0);
+      const pendenteMotorista = visibleRows(state.expenses).filter((e) => (e.vehicleId || e.linkedVehicleId) === v.id && e.status === "pendente").reduce((s, e) => s + Number(e.amount || 0), 0);
       const lucro = entrada - saida;
-      return `<tr><td><b>${esc(v.placa || v.id)}</b><br><span class="muted small">${esc(v.apelido || "")}</span></td><td>${esc(v.tipo || "")}</td><td><span class="badge info">${esc(v.status || "")}</span></td><td><span class="badge ${gpsBadge}">${age == null ? "sem GPS" : "há " + age + " min"}</span><br><span class="muted small">${esc(v.trackerId || v.trackerDeviceId || "")}</span></td><td>${canSeeSensitiveFinance() ? `<b>${money(lucro)}</b><br><span class="muted small">Receita ${money(entrada)} · Custo financeiro ${money(saida)} · Manutenção registrada ${money(manutencao)}</span>` : "Restrito"}</td></tr>`;
+      return `<tr><td><b>${esc(v.placa || v.id)}</b><br><span class="muted small">${esc(v.apelido || "")}</span></td><td>${esc(v.tipo || "")}</td><td><span class="badge info">${esc(v.status || "")}</span></td><td><span class="badge ${gpsBadge}">${age == null ? "sem GPS" : "há " + age + " min"}</span><br><span class="muted small">${esc(v.trackerId || v.trackerDeviceId || "")}</span></td><td>${canSeeSensitiveFinance() ? `<b>${money(lucro)}</b><br><span class="muted small">Receita ${money(entrada)} · Despesas da frota ${money(saida)} · Operacional ${money(operacional)} · Manutenção ${money(Math.max(manutencao, manutencaoFinanceira))}${pendenteMotorista ? ` · Pendente motorista ${money(pendenteMotorista)}` : ""}</span>` : "Restrito"}</td></tr>`;
     }).join("") + `</tbody></table>` : `<p class="muted">Nenhum veículo.</p>`;
 
     $("vehicleCards").innerHTML = rows.length ? rows.map((v) => {
@@ -1786,6 +1827,31 @@ Rota: ${url}`;
       const vehicle = state.vehicles[m.vehicleId] || {};
       return `<tr><td>${esc(m.date || dateTime(m.createdAt))}</td><td>${esc(vehicle.placa || m.vehicleId || "-")}</td><td>${esc(m.description || "")}<br><span class="muted small">${esc(m.odometerKm ? m.odometerKm + " km" : "")}</span></td><td><span class="badge info">${esc(m.status || "aberta")}</span></td><td>${canSeeSensitiveFinance() ? money(m.cost || 0) : "Restrito"}</td><td class="row-actions"><button class="btn" onclick="JM.app.editMaintenance('${esc(m.id)}')">Editar</button><button class="btn danger" onclick="JM.app.deleteMaintenance('${esc(m.id)}')">Excluir</button></td></tr>`;
     }).join("") + `</tbody></table>` : `<p class="muted">Nenhuma manutenção registrada.</p>`;
+  }
+
+  function renderVehicleCostsLedger() {
+    const box = $("vehicleCostsTable") || $("maintenanceTable");
+    if (!box || !canSeeSensitiveFinance()) return;
+    const rows = visibleRows(state.transactions)
+      .filter((t) => t.type === "saida" && t.vehicleId && (t.vehicleCost || t.sourceType === "driver_expense" || t.sourceType === "maintenance" || t.module === "maintenance"))
+      .sort((a, b) => String(b.date || b.createdAt || "").localeCompare(String(a.date || a.createdAt || "")));
+    const pending = visibleRows(state.expenses)
+      .filter((e) => e.status === "pendente" && (e.vehicleId || e.linkedVehicleId))
+      .sort((a, b) => String(b.createdAt || "").localeCompare(String(a.createdAt || "")));
+    const html = `<h3 style="margin-top:18px">Despesas do caminhão / custos da frota</h3>` +
+      (rows.length || pending.length ? `<table><thead><tr><th>Data</th><th>Veículo</th><th>Origem</th><th>Categoria</th><th>Status</th><th>Valor</th></tr></thead><tbody>` +
+      pending.map((e) => {
+        const vehicle = state.vehicles[e.vehicleId || e.linkedVehicleId] || {};
+        const call = state.calls[e.callId || e.linkedCallId] || {};
+        return `<tr><td>${esc(dateTime(e.createdAt))}</td><td>${esc(vehicle.placa || e.vehicleId || e.linkedVehicleId || "-")}</td><td>Motorista pendente<br><span class="muted small">${esc(e.driverName || e.driverId || "")} · ${esc(call.protocolo || e.protocol || "")}</span></td><td>${esc(e.type || e.vehicleCostCategory || "Despesa")}</td><td><span class="badge warn">Aguardando aprovação</span></td><td><b>${money(e.amount || 0)}</b></td></tr>`;
+      }).join("") +
+      rows.map((t) => {
+        const vehicle = state.vehicles[t.vehicleId] || {};
+        const kind = vehicleCostKindLabel(t.vehicleCostKind || (t.sourceType === "maintenance" || t.module === "maintenance" ? "maintenance" : "operational"));
+        return `<tr><td>${esc(t.date || dateTime(t.createdAt))}</td><td>${esc(vehicle.placa || t.vehicleId || "-")}</td><td>${esc(t.module || t.sourceType || "financeiro")}<br><span class="muted small">${esc(t.protocol || t.callId || "")}</span></td><td>${esc(t.category || t.vehicleCostCategory || "Despesa")}<br><span class="muted small">${esc(kind)}</span></td><td>${esc(t.status || "")}</td><td><b>${money(t.amount || 0)}</b></td></tr>`;
+      }).join("") + `</tbody></table>` : `<p class="muted">Nenhuma despesa de frota vinculada a veículo.</p>`);
+    if ($("vehicleCostsTable")) box.innerHTML = html;
+    else box.insertAdjacentHTML("afterend", html);
   }
 
   $("maintenanceForm") && ($("maintenanceForm").onsubmit = async (e) => {
@@ -2016,6 +2082,12 @@ Rota: ${url}`;
       data.insurance = call.insurance || "";
       data.insuranceProtocol = call.insuranceProtocol || "";
     }
+    if (isVehicleCostType(data.type, data.notes) && !data.vehicleId) {
+      return toast("Despesa de frota precisa estar vinculada a um veículo. Selecione o caminhão/guincho antes de enviar.", "danger");
+    }
+    data.vehicleCost = !!data.vehicleId;
+    data.vehicleCostKind = vehicleCostKind(data.type, data.notes);
+    data.vehicleCostCategory = data.type || "Despesa motorista";
     await db.collection("expenses").add(data);
     e.target.reset();
     toast("Despesa enviada para aprovação já vinculada ao chamado/veículo.", "ok");

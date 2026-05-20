@@ -4,7 +4,7 @@
   const { $, esc, parseMoney, toast, statusClass, routeKm, mapsRouteUrl, statusKey, statusLabel, isFinalStatus } = window.JM.utils;
   const { auth, db, arrayUnion } = window.JM.firebase;
   const cfg = window.JM_CONFIG || {};
-  const DRIVER_FLOW_VERSION = "jm-v17-fluxo-unico-financeiro-operacional";
+  const DRIVER_FLOW_VERSION = "jm-v17-1-custos-frota-combustivel";
   const state = { user: null, profile: null, calls: {}, vehicles: {}, expenses: {}, settings: {} };
   const unsubscribers = [];
 
@@ -38,6 +38,25 @@
   function callProtocolLabel(call, fallbackId) {
     return call && (call.protocolo || call.insuranceProtocol || call.id) || fallbackId || "";
   }
+
+  function normalizeCostText(value) {
+    return String(value || "").toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "").replace(/[^a-z0-9]+/g, " ").trim();
+  }
+
+  function isVehicleCostType(type, notes) {
+    const text = normalizeCostText(String(type || "") + " " + String(notes || ""));
+    return /combustivel|diesel|gasolina|etanol|arla|pedagio|estacionamento|lavagem|alimentacao|manutenc|revis|oleo|pneu|freio|suspens|eletric|borrachar|mecanica|motor|cambio|guincho|munck|plataforma|peca|pecas/.test(text);
+  }
+
+  function isMaintenanceExpenseType(type, notes) {
+    const text = normalizeCostText(String(type || "") + " " + String(notes || ""));
+    return /manutenc|revis|oleo|pneu|freio|suspens|eletric|mecanica|motor|cambio|guincho|munck|plataforma|borrachar|peca|pecas/.test(text);
+  }
+
+  function vehicleCostKind(type, notes) {
+    return isMaintenanceExpenseType(type, notes) ? "maintenance" : isVehicleCostType(type, notes) ? "operational" : "general";
+  }
+
 
   function syncDriverExpenseContext() {
     const callId = $("driverExpenseCall") && $("driverExpenseCall").value;
@@ -274,13 +293,16 @@
     const callId = $("driverExpenseCall").value;
     const call = callId && state.calls[callId] || null;
     const vehicleId = call && call.vehicleId || $("driverExpenseVehicle").value;
+    const expenseType = $("driverExpenseType").value;
+    const expenseNotes = $("driverExpenseNotes").value.trim();
+    if (isVehicleCostType(expenseType, expenseNotes) && !vehicleId) return toast("Despesa de frota precisa estar vinculada a um veículo. Selecione o caminhão/guincho antes de enviar.", "danger");
     if (callId && !vehicleId) return toast("Este chamado ainda não tem veículo. Selecione o veículo antes de enviar a despesa.", "danger");
     await db.collection("expenses").add({
       callId,
       vehicleId,
-      type: $("driverExpenseType").value,
+      type: expenseType,
       amount: parseMoney($("driverExpenseAmount").value),
-      notes: $("driverExpenseNotes").value.trim(),
+      notes: expenseNotes,
       photoUrl,
       status: "pendente",
       driverId: state.user.uid,
@@ -292,6 +314,9 @@
       insuranceProtocol: call && call.insuranceProtocol || "",
       customerPlate: call && call.customerPlate || "",
       sourceType: "driver_expense",
+      vehicleCost: !!vehicleId,
+      vehicleCostKind: vehicleCostKind(expenseType, expenseNotes),
+      vehicleCostCategory: expenseType || "Despesa motorista",
       createdAt: new Date().toISOString(),
       createdBy: state.user.uid
     });
