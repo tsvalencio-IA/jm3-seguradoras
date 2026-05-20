@@ -15,6 +15,9 @@ Esta versão mantém o sistema em frontend estático/GitHub Pages, mas separa me
 - Chamados, financeiro, despesas, manutenção e equipe passam a ter exclusão operacional com auditoria em `auditLogs`.
 - Motorista não visualiza valor/lucro do chamado e envia relatório/checklist/foto para a central.
 - Central Operacional ganha filtros por status, prioridade, seguradora, motorista e veículo.
+- `formulario.html` foi adicionado para a gestora responder o briefing operacional antes da próxima lapidação.
+- O `jm.html` ganhou abas de Clientes / Seguradoras, Integrações e Pagamentos.
+- Chamados com rota OSRM agora salvam geometria compatível com Firestore, sem arrays aninhados.
 
 ## Publicação Obrigatória
 
@@ -46,6 +49,8 @@ O sistema agora avisa quando uma posição foi sincronizada sem vínculo com pla
 O token informado no chat deve ser considerado exposto. Para operação profissional, gere outro token na plataforma de rastreamento antes da publicação.
 
 Como este projeto ainda roda em frontend estático, qualquer token salvo no app pode ser lido por usuários autenticados com acesso ao painel. A evolução profissional correta é mover a chamada ao Trackar para uma Cloud Function ou backend proxy.
+
+Integração automática com sites de seguradoras exige autorização e camada técnica própria. O painel já tem a fila `integrationInbox` para receber acionamentos externos, mas o conector real deve ser API/webhook oficial, e-mail parser autorizado, Cloud Function ou robô autorizado. Não trate raspagem improvisada do navegador como solução profissional.
 
 Ao excluir um funcionário no `jm.html`, o app desativa o cadastro operacional, grava auditoria e remove as permissões em `managerAccess`/`driverAccess`. A conta do Firebase Authentication só pode ser apagada com Admin SDK, Cloud Function ou manualmente no Console Firebase.
 

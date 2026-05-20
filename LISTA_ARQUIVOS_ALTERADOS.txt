@@ -2,6 +2,7 @@
 DEVTOOLS_TEST_JM_GUINCHOS.js
 ENTREGA_V16.md
 firestore.rules
+formulario.html
 index.html
 jm.html
 js/app.js

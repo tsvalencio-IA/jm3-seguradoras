@@ -4,7 +4,8 @@
   const {
     $, $all, esc, money, parseMoney, dateTime, todayInput, plateKey, isValidPlate,
     uidSafe, coords, pointFrom, routeKm, mapsRouteUrl, normalizeUrl, toast, statusClass,
-    statusKey, statusLabel, isFinalStatus: utilIsFinalStatus, maskPhone, phoneWhatsappUrl
+    statusKey, statusLabel, isFinalStatus: utilIsFinalStatus, maskPhone, phoneWhatsappUrl,
+    geometryToFirestore
   } = window.JM.utils;
   const { auth, secondaryAuth, db, ts, arrayUnion, emailIsAdmin } = window.JM.firebase;
   const cfg = window.JM_CONFIG || {};
@@ -22,6 +23,8 @@
     expenses: {},
     transactions: {},
     maintenance: {},
+    customers: {},
+    integrationInbox: {},
     settings: {},
     addresses: { origin: null, destination: null, waypoints: [] },
     smartRoute: null,
@@ -35,7 +38,9 @@
     editingCallId: null,
     editingUserId: null,
     editingTransactionId: null,
-    editingMaintenanceId: null
+    editingMaintenanceId: null,
+    editingCustomerId: null,
+    editingPaymentId: null
   };
 
   const unsubscribers = [];
@@ -149,6 +154,60 @@
 
   function visibleRows(rows) {
     return Object.values(rows || {}).filter((row) => row && !row.deletedAt);
+  }
+
+  function storePoint(value) {
+    const point = pointFrom(value);
+    return point ? { lat: point.lat, lng: point.lng } : null;
+  }
+
+  function storeAddress(address) {
+    if (!address) return null;
+    return {
+      label: address.label || "",
+      coords: storePoint(address.coords),
+      source: address.source || "",
+      provider: address.provider || "",
+      raw: address.raw || "",
+      externalUrl: address.externalUrl || "",
+      resolvedAt: address.resolvedAt || ""
+    };
+  }
+
+  function storeRoute(route) {
+    if (!route) return null;
+    return {
+      source: route.source || "",
+      label: route.label || "",
+      distanceMeters: Number(route.distanceMeters || 0),
+      distanceText: route.distanceText || "",
+      durationSeconds: Number(route.durationSeconds || 0),
+      durationText: route.durationText || "",
+      durationTrafficText: route.durationTrafficText || "",
+      start: storePoint(route.start),
+      end: storePoint(route.end),
+      geometry: geometryToFirestore(route.geometry),
+      isPrecise: !!route.isPrecise,
+      fallbackReason: route.fallbackReason || "",
+      calculatedAt: route.calculatedAt || new Date().toISOString()
+    };
+  }
+
+  function storeRouteMetrics(best) {
+    if (!best) return null;
+    return {
+      recommendedVehicleId: best.vehicle && best.vehicle.id || "",
+      recommendedVehiclePlate: best.vehicle && best.vehicle.placa || "",
+      bestToOrigin: storeRoute(best.toOrigin),
+      serviceRoute: storeRoute(best.serviceRoute),
+      fullRoute: storeRoute(best.fullRoute),
+      kmToOrigin: Number(best.kmToOrigin || 0),
+      minutesToOrigin: Number(best.minutesToOrigin || 0),
+      score: Number(best.score || 0),
+      routeUrl: best.routeUrl || "",
+      calculatedAt: state.smartRoute && state.smartRoute.calculatedAt || new Date().toISOString(),
+      algorithm: "tracker_position + openstreetmap_osrm_route + fallback_haversine + status_penalty"
+    };
   }
 
   function personName() {
@@ -464,9 +523,12 @@
       dashboard: "Dashboard",
       operacao: "Central Operacional",
       chamados: "Chamados",
+      clientes: "Clientes / seguradoras",
+      integracoes: "Integrações",
       mapa: "Mapa / Tracker",
       motorista: "Painel motorista",
       financeiro: "Financeiro",
+      pagamentos: "Pagamentos",
       frota: "Frota",
       equipe: "Equipe"
     };
@@ -535,6 +597,21 @@
     if ($("finDate")) $("finDate").value = todayInput();
   }
 
+  function resetPaymentForm() {
+    if ($("paymentForm")) $("paymentForm").reset();
+    state.editingPaymentId = null;
+    setSubmitText("paymentForm", "Salvar pagamento");
+    if ($("paymentCancelEdit")) $("paymentCancelEdit").classList.add("hidden");
+    if ($("payDate")) $("payDate").value = todayInput();
+  }
+
+  function resetCustomerForm() {
+    if ($("customerForm")) $("customerForm").reset();
+    state.editingCustomerId = null;
+    setSubmitText("customerForm", "Salvar cliente");
+    if ($("customerCancelEdit")) $("customerCancelEdit").classList.add("hidden");
+  }
+
   function resetMaintenanceForm() {
     if ($("maintenanceForm")) $("maintenanceForm").reset();
     state.editingMaintenanceId = null;
@@ -550,9 +627,13 @@
       const el = $(id);
       if (el) el.oninput = () => { el.value = plateKey(el.value); };
     });
-    ["callPrice", "callExtraKm", "finAmount", "maintenanceCost"].forEach((id) => {
+    ["callPrice", "callExtraKm", "finAmount", "maintenanceCost", "payAmount"].forEach((id) => {
       const el = $(id);
       if (el) el.onblur = () => { if (el.value) el.value = String(parseMoney(el.value)).replace(".", ","); };
+    });
+    ["customerPhone", "customerBillingPhone"].forEach((id) => {
+      const el = $(id);
+      if (el) el.oninput = () => { el.value = maskPhone(el.value); };
     });
   }
 
@@ -727,7 +808,7 @@
 
   function startListeners() {
     unsubscribers.splice(0).forEach((fn) => fn());
-    const baseCollections = ["vehicles", "calls", "users"];
+    const baseCollections = ["vehicles", "calls", "users", "customers", "integrationInbox"];
     if (canManageFinance()) baseCollections.push("expenses", "transactions");
     if (canManageFleet() || canManageFinance()) baseCollections.push("maintenance");
     baseCollections.forEach((name) => listenCollection(name, name));
@@ -747,7 +828,10 @@
 
   function applyRoleVisibility() {
     const visibility = {
+      clientes: isOffice(),
+      integracoes: canOperateCalls(),
       financeiro: canManageFinance(),
+      pagamentos: canManageFinance(),
       frota: canManageFleet(),
       equipe: canManageTeam()
     };
@@ -817,11 +901,14 @@
     renderDashboard();
     renderOperations();
     renderCalls();
+    renderCustomers();
+    renderIntegrationInbox();
     renderVehicles();
     renderMaintenance();
     renderTeam();
     if ($("driverCalls")) renderDriverPanel();
     renderFinance();
+    renderPayments();
     refreshMaps();
   }
 
@@ -836,6 +923,11 @@
   function renderSelects() {
     const vehicles = visibleRows(state.vehicles);
     const calls = visibleRows(state.calls);
+    const customers = visibleRows(state.customers).sort((a, b) => String(a.name || "").localeCompare(String(b.name || "")));
+    const customerOptions = customers.map((c) => `<option value="${esc(c.id)}">${esc(c.name || c.razaoSocial || c.id)}${c.type ? " - " + esc(c.type) : ""}</option>`).join("");
+    setOptionsPreservingValue("callCustomerId", `<option value="">Cliente avulso</option>${customerOptions}`);
+    setOptionsPreservingValue("finCustomer", `<option value="">Sem cliente</option>${customerOptions}`);
+    setOptionsPreservingValue("payCustomer", `<option value="">Selecione</option>${customerOptions}`);
     const vehicleOptions = vehicles.map((v) => `<option value="${esc(v.id)}">${esc(v.placa || v.id)} - ${esc(v.apelido || v.tipo || "")}</option>`).join("");
     setOptionsPreservingValue("callVehicle", `<option value="">Selecione</option>${vehicleOptions}`);
     setOptionsPreservingValue("expenseVehicle", `<option value="">Selecione</option>${vehicleOptions}`);
@@ -847,6 +939,7 @@
     setOptionsPreservingValue("finDriver", `<option value="">Sem motorista</option>${driverOptions}`);
     const callOptions = calls.map((c) => `<option value="${esc(c.id)}">${esc(c.protocolo || c.cliente || c.id)}</option>`).join("");
     setOptionsPreservingValue("finCall", `<option value="">Sem chamado</option>${callOptions}`);
+    setOptionsPreservingValue("payCall", `<option value="">Sem chamado</option>${callOptions}`);
     const myCalls = calls.filter((c) => c.driverId === state.user?.uid && !isFinalStatus(c));
     setOptionsPreservingValue("expenseCall", `<option value="">Sem chamado</option>` + myCalls.map((c) => `<option value="${esc(c.id)}">${esc(c.protocolo || c.cliente)}</option>`).join(""));
   }
@@ -1073,8 +1166,12 @@ Rota: ${url}`;
     const externalRouteUrl = currentExternalRouteUrl();
     const now = new Date().toISOString();
     setButtonBusy(submitBtn, true, "Salvando...");
+    const selectedCustomer = $("callCustomerId") && $("callCustomerId").value ? state.customers[$("callCustomerId").value] || null : null;
     const baseData = {
+      customerId: $("callCustomerId") ? $("callCustomerId").value : "",
       cliente: $("callClient").value.trim(),
+      customerType: selectedCustomer && selectedCustomer.type || "",
+      customerDocument: selectedCustomer && selectedCustomer.document || "",
       phone: $("callPhone").value.trim(),
       serviceType: $("callType").value,
       valor: parseMoney($("callPrice").value),
@@ -1094,27 +1191,22 @@ Rota: ${url}`;
       driverId: $("callDriver").value,
       originLabel: originAddress.label,
       destLabel: destinationAddress && destinationAddress.label || "",
-      origin: originAddress.coords,
-      destination: destinationAddress && destinationAddress.coords || null,
-      origem: originAddress,
-      destino: destinationAddress || null,
-      routeWaypoints: state.addresses.waypoints || [],
+      origin: storePoint(originAddress.coords),
+      destination: destinationAddress && storePoint(destinationAddress.coords) || null,
+      origem: storeAddress(originAddress),
+      destino: storeAddress(destinationAddress),
+      routeWaypoints: (state.addresses.waypoints || []).map((row, index) => ({
+        label: row && row.label || "Parada " + (index + 1),
+        point: storePoint(row && (row.point || row.coords || row))
+      })).filter((row) => row.point),
       routeExternalUrl: externalRouteUrl,
       routeProvider: externalRouteUrl ? "external_link" : "generated_google_maps_url",
       routeUrl: externalRouteUrl || (window.JM.googleMaps && window.JM.googleMaps.routeUrl(routePoints) || mapsRouteUrl(routePoints)),
-      routeGeometry: best && best.fullRoute && best.fullRoute.geometry || null,
+      routeGeometry: best && best.fullRoute && geometryToFirestore(best.fullRoute.geometry) || null,
       routePrecision: best && best.fullRoute && best.fullRoute.source || "pending_map_render",
       routeDistanceText: best && best.fullRoute && best.fullRoute.distanceText || "",
       routeDurationText: best && best.fullRoute && best.fullRoute.durationText || "",
-      routeMetrics: best ? {
-        recommendedVehicleId: best.vehicle && best.vehicle.id || "",
-        recommendedVehiclePlate: best.vehicle && best.vehicle.placa || "",
-        bestToOrigin: best.toOrigin || null,
-        serviceRoute: best.serviceRoute || null,
-        fullRoute: best.fullRoute || null,
-        calculatedAt: state.smartRoute && state.smartRoute.calculatedAt || new Date().toISOString(),
-        algorithm: "tracker_position + openstreetmap_osrm_route + fallback_haversine + status_penalty"
-      } : null,
+      routeMetrics: storeRouteMetrics(best),
       notes: $("callNotes").value.trim()
     };
     try {
@@ -1186,6 +1278,7 @@ Rota: ${url}`;
     if (!call) return toast("Chamado não encontrado.", "danger");
     state.editingCallId = id;
     showView("chamados");
+    setValue("callCustomerId", call.customerId || "");
     setValue("callClient", call.cliente || "");
     setValue("callPhone", call.phone || "");
     setValue("callType", call.serviceType || "Guincho");
@@ -1256,6 +1349,136 @@ Rota: ${url}`;
     await batch.commit();
     if (state.editingCallId === id) resetCallForm();
     toast("Chamado removido do painel com auditoria.", "ok");
+  }
+
+  function renderCustomers() {
+    if (!$("customersTable")) return;
+    const rows = visibleRows(state.customers).sort((a, b) => String(a.name || "").localeCompare(String(b.name || "")));
+    $("customersTable").innerHTML = rows.length ? `<table><thead><tr><th>Cliente</th><th>Tipo</th><th>Contato</th><th>Faturamento</th><th>Ações</th></tr></thead><tbody>` + rows.map((c) => {
+      const wa = phoneWhatsappUrl(c.phone, "JM Guinchos");
+      return `<tr>
+        <td><b>${esc(c.name || c.razaoSocial || c.id)}</b><br><span class="muted small">${esc(c.document || "")}</span></td>
+        <td>${esc(c.type || "")}<br><span class="muted small">${esc(c.portalUrl || "")}</span></td>
+        <td>${esc(c.contactName || "")}<br><span class="muted small">${esc(c.phone || "")} ${wa ? `· <a class="info" target="_blank" href="${esc(wa)}">WhatsApp</a>` : ""}</span><br><span class="muted small">${esc(c.email || "")}</span></td>
+        <td>${esc(c.paymentTerm || "")}<br><span class="muted small">${esc(c.billingRules || "")}</span></td>
+        <td class="row-actions"><button class="btn" onclick="JM.app.editCustomer('${esc(c.id)}')">Editar</button><button class="btn danger" onclick="JM.app.deleteCustomer('${esc(c.id)}')">Excluir</button></td>
+      </tr>`;
+    }).join("") + `</tbody></table>` : `<p class="muted">Cadastre clientes particulares, empresas, seguradoras e assistências para vincular chamados e pagamentos.</p>`;
+  }
+
+  $("customerForm") && ($("customerForm").onsubmit = async (e) => {
+    e.preventDefault();
+    if (!isOffice()) return toast("Sem permissão para cadastrar clientes.", "danger");
+    const now = new Date().toISOString();
+    const payload = {
+      name: $("customerName").value.trim(),
+      type: $("customerType").value,
+      document: $("customerDocument").value.trim(),
+      contactName: $("customerContact").value.trim(),
+      phone: $("customerPhone").value.trim(),
+      email: $("customerEmail").value.trim(),
+      portalUrl: $("customerPortal").value.trim(),
+      billingPhone: $("customerBillingPhone").value.trim(),
+      paymentTerm: $("customerPaymentTerm").value.trim(),
+      billingRules: $("customerBillingRules").value.trim(),
+      updatedAt: now,
+      updatedBy: state.user.uid
+    };
+    if (!payload.name) return toast("Informe o nome do cliente/seguradora.", "danger");
+    if (state.editingCustomerId) {
+      await db.collection("customers").doc(state.editingCustomerId).set(payload, { merge: true });
+      toast("Cliente atualizado.", "ok");
+    } else {
+      await db.collection("customers").add(Object.assign({ createdAt: now, createdBy: state.user.uid }, payload));
+      toast("Cliente cadastrado.", "ok");
+    }
+    resetCustomerForm();
+  });
+
+  function editCustomer(id) {
+    const c = state.customers[id];
+    if (!c) return toast("Cliente não encontrado.", "danger");
+    state.editingCustomerId = id;
+    showView("clientes");
+    setValue("customerName", c.name || "");
+    setValue("customerType", c.type || "Particular");
+    setValue("customerDocument", c.document || "");
+    setValue("customerContact", c.contactName || "");
+    setValue("customerPhone", c.phone || "");
+    setValue("customerEmail", c.email || "");
+    setValue("customerPortal", c.portalUrl || "");
+    setValue("customerBillingPhone", c.billingPhone || "");
+    setValue("customerPaymentTerm", c.paymentTerm || "");
+    setValue("customerBillingRules", c.billingRules || "");
+    setSubmitText("customerForm", "Salvar alterações do cliente");
+    if ($("customerCancelEdit")) $("customerCancelEdit").classList.remove("hidden");
+  }
+
+  async function deleteCustomer(id) {
+    if (!canOwnCompany()) return toast("Somente gestor/dono pode excluir cliente.", "danger");
+    const c = state.customers[id];
+    if (!c) return;
+    const reason = window.prompt("Motivo para excluir/desativar cliente:", "Cadastro duplicado ou inativo");
+    if (reason === null) return;
+    await softDeleteDoc("customers", id, c, reason);
+    if (state.editingCustomerId === id) resetCustomerForm();
+    toast("Cliente removido do painel com auditoria.", "ok");
+  }
+
+  function renderIntegrationInbox() {
+    if (!$("integrationInboxTable")) return;
+    const rows = visibleRows(state.integrationInbox).sort((a, b) => String(b.createdAt || "").localeCompare(String(a.createdAt || "")));
+    $("integrationInboxTable").innerHTML = rows.length ? `<table><thead><tr><th>Origem</th><th>Protocolo</th><th>Cliente</th><th>Status</th><th>Ações</th></tr></thead><tbody>` + rows.map((row) => `<tr>
+      <td><b>${esc(row.sourceName || row.source || "Integração")}</b><br><span class="muted small">${dateTime(row.createdAt)}</span></td>
+      <td>${esc(row.protocol || row.externalId || "")}</td>
+      <td>${esc(row.customerName || "")}<br><span class="muted small">${esc(row.customerPhone || "")}</span></td>
+      <td><span class="badge ${row.status === "convertido" ? "ok" : row.status === "erro" ? "danger" : "warn"}">${esc(row.status || "novo")}</span></td>
+      <td class="row-actions"><button class="btn good" onclick="JM.app.applyIntegrationToCall('${esc(row.id)}')">Gerar chamado</button><button class="btn" onclick="JM.app.markIntegrationHandled('${esc(row.id)}')">Marcar tratado</button></td>
+    </tr>`).join("") + `</tbody></table>` : `<p class="muted">Sem acionamentos externos na fila. A integração real entra aqui por webhook, e-mail parser ou robô autorizado.</p>`;
+  }
+
+  $("integrationForm") && ($("integrationForm").onsubmit = async (e) => {
+    e.preventDefault();
+    if (!canOperateCalls()) return toast("Sem permissão para registrar acionamento externo.", "danger");
+    await db.collection("integrationInbox").add({
+      sourceName: $("intSource").value.trim(),
+      protocol: $("intProtocol").value.trim(),
+      customerName: $("intCustomer").value.trim(),
+      customerPhone: $("intPhone").value.trim(),
+      payloadText: $("intPayload").value.trim(),
+      status: "novo",
+      createdAt: new Date().toISOString(),
+      createdBy: state.user.uid
+    });
+    e.target.reset();
+    toast("Acionamento externo entrou na fila.", "ok");
+  });
+
+  function applyIntegrationToCall(id) {
+    const row = state.integrationInbox[id];
+    if (!row) return;
+    showView("chamados");
+    setValue("callClient", row.customerName || "");
+    setValue("callPhone", row.customerPhone || "");
+    setValue("callSource", "Seguradora");
+    setValue("callInsurance", row.sourceName || "");
+    setValue("callInsuranceProtocol", row.protocol || row.externalId || "");
+    setValue("callNotes", row.payloadText || "");
+    db.collection("integrationInbox").doc(id).set({
+      status: "em_tratamento",
+      handledAt: new Date().toISOString(),
+      handledBy: state.user.uid
+    }, { merge: true }).catch(() => {});
+    toast("Dados aplicados ao formulário de chamado. Complete origem/destino e registre.", "ok");
+  }
+
+  async function markIntegrationHandled(id) {
+    await db.collection("integrationInbox").doc(id).set({
+      status: "tratado",
+      handledAt: new Date().toISOString(),
+      handledBy: state.user.uid
+    }, { merge: true });
+    toast("Acionamento marcado como tratado.", "ok");
   }
 
   function renderVehicles() {
@@ -1561,6 +1784,7 @@ Rota: ${url}`;
       amount: parseMoney($("finAmount").value),
       status: $("finStatus").value,
       category: $("finCategory") ? $("finCategory").value.trim() : "",
+      customerId: $("finCustomer") ? $("finCustomer").value : "",
       callId: $("finCall") ? $("finCall").value : "",
       vehicleId: $("finVehicle") ? $("finVehicle").value : "",
       driverId: $("finDriver") ? $("finDriver").value : "",
@@ -1577,6 +1801,84 @@ Rota: ${url}`;
     resetFinanceForm();
   };
 
+  function renderPayments() {
+    if (!$("paymentsTable")) return;
+    if (!canManageFinance()) {
+      $("paymentsTable").innerHTML = `<p class="muted">Gestão de pagamentos disponível somente para gestor/dono e financeiro.</p>`;
+      return;
+    }
+    const rows = visibleRows(state.transactions)
+      .filter((t) => t.module === "payments" || t.customerId || t.billingParty)
+      .sort((a, b) => String(b.dueDate || b.date || b.createdAt || "").localeCompare(String(a.dueDate || a.date || a.createdAt || "")));
+    const receber = rows.filter((t) => t.type === "entrada" && String(t.status || "").toLowerCase() !== "recebido").reduce((s, t) => s + Number(t.amount || 0), 0);
+    const pagar = rows.filter((t) => t.type === "saida" && !/pago/i.test(String(t.status || ""))).reduce((s, t) => s + Number(t.amount || 0), 0);
+    $("paymentsSummary").innerHTML = `<div class="finance-summary"><span>A receber <b>${money(receber)}</b></span><span>A pagar <b>${money(pagar)}</b></span><span>Registros <b>${rows.length}</b></span></div>`;
+    $("paymentsTable").innerHTML = rows.length ? `<table><thead><tr><th>Vencimento</th><th>Cliente/seguradora</th><th>Documento</th><th>Status</th><th>Valor</th><th>Ações</th></tr></thead><tbody>` + rows.map((p) => {
+      const customer = state.customers[p.customerId] || {};
+      return `<tr>
+        <td>${esc(p.dueDate || p.date || "")}<br><span class="muted small">${esc(p.paymentMethod || "")}</span></td>
+        <td><b>${esc(customer.name || p.billingParty || "")}</b><br><span class="muted small">${esc(p.category || "")}</span></td>
+        <td>${esc(p.invoiceNumber || p.description || "")}<br><span class="muted small">${esc(p.callId || "")}</span></td>
+        <td><span class="badge ${/recebido|pago/i.test(String(p.status || "")) ? "ok" : "warn"}">${esc(p.status || "")}</span></td>
+        <td><b>${money(p.amount || 0)}</b></td>
+        <td class="row-actions"><button class="btn" onclick="JM.app.editPayment('${esc(p.id)}')">Editar</button><button class="btn danger" onclick="JM.app.deleteTransaction('${esc(p.id)}')">Excluir</button></td>
+      </tr>`;
+    }).join("") + `</tbody></table>` : `<p class="muted">Nenhum pagamento cadastrado para clientes/seguradoras.</p>`;
+  }
+
+  $("paymentForm") && ($("paymentForm").onsubmit = async (e) => {
+    e.preventDefault();
+    if (!canManageFinance()) return toast("Somente gestor/dono ou financeiro pode gerir pagamentos.", "danger");
+    const customer = $("payCustomer").value ? state.customers[$("payCustomer").value] || null : null;
+    const payload = {
+      module: "payments",
+      type: $("payType").value,
+      date: $("payDate").value || todayInput(),
+      dueDate: $("payDueDate").value || $("payDate").value || todayInput(),
+      description: $("payDescription").value.trim(),
+      amount: parseMoney($("payAmount").value),
+      status: $("payStatus").value,
+      paymentMethod: $("payMethod").value,
+      invoiceNumber: $("payInvoice").value.trim(),
+      category: $("payCategory").value.trim(),
+      customerId: $("payCustomer").value,
+      billingParty: customer && customer.name || $("payBillingParty").value.trim(),
+      callId: $("payCall").value,
+      updatedAt: new Date().toISOString(),
+      updatedBy: state.user.uid
+    };
+    if (!payload.billingParty && !payload.customerId) return toast("Selecione ou informe quem vai pagar/receber.", "danger");
+    if (state.editingPaymentId) {
+      await db.collection("transactions").doc(state.editingPaymentId).set(payload, { merge: true });
+      toast("Pagamento atualizado.", "ok");
+    } else {
+      await db.collection("transactions").add(Object.assign({ createdAt: new Date().toISOString(), createdBy: state.user.uid }, payload));
+      toast("Pagamento cadastrado.", "ok");
+    }
+    resetPaymentForm();
+  });
+
+  function editPayment(id) {
+    const tx = state.transactions[id];
+    if (!tx || !canManageFinance()) return;
+    state.editingPaymentId = id;
+    showView("pagamentos");
+    setValue("payType", tx.type || "entrada");
+    setValue("payDate", tx.date || todayInput());
+    setValue("payDueDate", tx.dueDate || tx.date || todayInput());
+    setValue("payCustomer", tx.customerId || "");
+    setValue("payBillingParty", tx.billingParty || "");
+    setValue("payCall", tx.callId || "");
+    setValue("payDescription", tx.description || "");
+    setValue("payInvoice", tx.invoiceNumber || "");
+    setValue("payCategory", tx.category || "");
+    setValue("payMethod", tx.paymentMethod || "PIX");
+    setValue("payStatus", tx.status || "A receber");
+    setValue("payAmount", tx.amount || "");
+    setSubmitText("paymentForm", "Salvar alterações do pagamento");
+    if ($("paymentCancelEdit")) $("paymentCancelEdit").classList.remove("hidden");
+  }
+
   function editTransaction(id) {
     if (!canManageFinance()) return toast("Sem permissão para editar financeiro.", "danger");
     const tx = state.transactions[id];
@@ -1588,6 +1890,7 @@ Rota: ${url}`;
     setValue("finAmount", tx.amount || "");
     setValue("finStatus", tx.status || "Pendente");
     setValue("finCategory", tx.category || "");
+    setValue("finCustomer", tx.customerId || "");
     setValue("finCall", tx.callId || "");
     setValue("finVehicle", tx.vehicleId || "");
     setValue("finDriver", tx.driverId || "");
@@ -1659,6 +1962,8 @@ Rota: ${url}`;
     if ($("callCancelEdit")) $("callCancelEdit").onclick = resetCallForm;
     if ($("teamCancelEdit")) $("teamCancelEdit").onclick = resetTeamForm;
     if ($("financeCancelEdit")) $("financeCancelEdit").onclick = resetFinanceForm;
+    if ($("paymentCancelEdit")) $("paymentCancelEdit").onclick = resetPaymentForm;
+    if ($("customerCancelEdit")) $("customerCancelEdit").onclick = resetCustomerForm;
     if ($("maintenanceCancelEdit")) $("maintenanceCancelEdit").onclick = resetMaintenanceForm;
   }
 
@@ -1669,6 +1974,7 @@ Rota: ${url}`;
     renderSmartRouteBox();
     initializeAddressTools();
     if ($("finDate")) $("finDate").value = todayInput();
+    if ($("payDate")) $("payDate").value = todayInput();
     if ($("maintenanceDate")) $("maintenanceDate").value = todayInput();
     console.info("JM Guinchos login flow", LOGIN_FLOW_VERSION);
     registerFreshServiceWorker();
@@ -1687,7 +1993,12 @@ Rota: ${url}`;
     editTeamMember,
     deleteTeamMember,
     editTransaction,
+    editPayment,
     deleteTransaction,
+    editCustomer,
+    deleteCustomer,
+    applyIntegrationToCall,
+    markIntegrationHandled,
     editMaintenance,
     deleteMaintenance,
     approveExpense,

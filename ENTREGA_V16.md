@@ -13,6 +13,11 @@ Principais melhorias:
 - SLA visível na fila operacional e status de cobrança no chamado.
 - Motorista sem valor previsto/lucro, com fluxo operacional por etapa e envio de relatório/checklist/foto.
 - Financeiro com edição, exclusão lógica auditada, vínculos com chamado, veículo e motorista.
+- Cadastro de clientes, seguradoras e parceiros para vincular chamados, faturamento e regras de cobrança.
+- Aba de pagamentos para contas a receber/pagar de clientes e seguradoras, usando `transactions` com campos de cobrança.
+- Fila `integrationInbox` para entrada profissional de acionamentos externos antes de virar chamado.
+- `formulario.html` para a gestora responder o briefing operacional e orientar a próxima lapidação do SaaS.
+- Correção da gravação de rota no Firestore: geometria OSRM deixou de usar arrays aninhados, evitando o erro `Nested arrays are not supported`.
 - Frota com trackerId/deviceId, última posição, GPS atrasado, manutenção, custo e resultado restrito a perfis financeiros.
 - Auditoria em `auditLogs` para exclusões importantes.
 - Cache PWA atualizado para V16.
@@ -34,6 +39,7 @@ Principais melhorias:
 - `README_JM_GUINCHOS.md`
 - `DEVTOOLS_TEST_JM_GUINCHOS.js`
 - `ENTREGA_V16.md`
+- `formulario.html`
 
 ## O que foi preservado
 
@@ -49,6 +55,7 @@ Principais melhorias:
 
 - Exclusão real de conta no Firebase Authentication não é possível com segurança em frontend puro. A V16 remove o acesso operacional (`managerAccess`/`driverAccess`) e desativa o usuário no painel; a exclusão do Auth fica para Console Firebase, Admin SDK ou Cloud Function.
 - Se o Tracker RAFA bloquear CORS/preflight no navegador, o frontend mostra mensagem clara. A solução profissional definitiva é proxy/Cloud Function, documentada como evolução futura porque esta fase não usa backend obrigatório.
+- Integração automática com sites de seguradoras não deve ser feita por raspagem improvisada no navegador. A V16 criou a fila `integrationInbox`; o conector real deve ser webhook/API oficial, e-mail parser autorizado, Cloud Function ou robô autorizado com credenciais da JM.
 - Upload de fotos depende de Cloudinary configurado no `superadmin.html`.
 
 ## Teste real recomendado
@@ -60,11 +67,15 @@ Principais melhorias:
 5. Entre em `jm.html` com gestor/dono.
 6. Crie motorista com senha inicial e teste login em `motorista.html`.
 7. Crie chamado com seguradora, protocolo, origem, destino, SLA e motorista.
-8. Na Central Operacional, filtre por prioridade, seguradora, motorista e veículo.
-9. Despache veículo, abra rota, copie rota e use WhatsApp.
-10. No motorista, altere status, envie relatório/checklist/foto e lance despesa.
-11. No financeiro, aprove despesa, edite lançamento e exclua com motivo.
-12. Na frota, cadastre trackerId/deviceId, registre manutenção e confira GPS/resultado.
+8. Cadastre uma seguradora em Clientes / Seguradoras e vincule ao chamado.
+9. Em Integrações, cole um acionamento recebido por portal/e-mail e gere um chamado a partir da fila.
+10. Em Pagamentos, registre conta a receber da seguradora/cliente e confira o financeiro.
+11. Na Central Operacional, filtre por prioridade, seguradora, motorista e veículo.
+12. Despache veículo, abra rota, copie rota e use WhatsApp.
+13. No motorista, altere status, envie relatório/checklist/foto e lance despesa.
+14. No financeiro, aprove despesa, edite lançamento e exclua com motivo.
+15. Na frota, cadastre trackerId/deviceId, registre manutenção e confira GPS/resultado.
+16. Abra `formulario.html` e gere o briefing da gestora.
 
 ## Checklist por perfil
 
@@ -93,4 +104,4 @@ node --check service-worker.js
 
 ## Cache/PWA
 
-O cache foi atualizado para `jm-guinchos-central-operacional-seguradoras-v16`. Após publicar no GitHub Pages, recarregue com Ctrl+F5 ou limpe dados do site se o navegador insistir em arquivos antigos.
+O cache foi atualizado para `jm-guinchos-central-operacional-seguradoras-v16-briefing`. Após publicar no GitHub Pages, recarregue com Ctrl+F5 ou limpe dados do site se o navegador insistir em arquivos antigos.

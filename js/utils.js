@@ -242,9 +242,38 @@
     return total;
   }
 
+  function geometryPointFromStore(pair) {
+    if (Array.isArray(pair) && pair.length >= 2) return { lng: Number(pair[0]), lat: Number(pair[1]) };
+    if (pair && typeof pair === "object") {
+      const lng = Number(pair.lng ?? pair.longitude ?? pair.lon);
+      const lat = Number(pair.lat ?? pair.latitude);
+      if (Number.isFinite(lat) && Number.isFinite(lng)) return { lat, lng };
+    }
+    return null;
+  }
+
+  function geometryToFirestore(geometry) {
+    if (!geometry || geometry.type !== "LineString" || !Array.isArray(geometry.coordinates)) return null;
+    const coordinates = geometry.coordinates
+      .map(geometryPointFromStore)
+      .filter(Boolean)
+      .map((p) => ({ lng: p.lng, lat: p.lat }));
+    return coordinates.length >= 2 ? { type: "LineString", coordinates } : null;
+  }
+
+  function geometryToGeoJson(geometry) {
+    if (!geometry || geometry.type !== "LineString" || !Array.isArray(geometry.coordinates)) return null;
+    const coordinates = geometry.coordinates
+      .map(geometryPointFromStore)
+      .filter(Boolean)
+      .map((p) => [p.lng, p.lat]);
+    return coordinates.length >= 2 ? { type: "LineString", coordinates } : null;
+  }
+
   function geoJsonToLatLngs(geometry) {
-    if (!geometry || geometry.type !== "LineString" || !Array.isArray(geometry.coordinates)) return [];
-    return geometry.coordinates
+    const normalized = geometryToGeoJson(geometry);
+    if (!normalized) return [];
+    return normalized.coordinates
       .map((pair) => Array.isArray(pair) && pair.length >= 2 ? [Number(pair[1]), Number(pair[0])] : null)
       .filter((pair) => pair && Number.isFinite(pair[0]) && Number.isFinite(pair[1]));
   }
@@ -301,6 +330,6 @@
     isValidPlate, digits, maskPhone, phoneWhatsappUrl, maskCpf, maskCnpj, validateCpf, validateCnpj,
     STATUS_DEFS, statusKey, statusLabel, isFinalStatus,
     uidSafe, coords, pointFrom, isPoint, roundPoint, haversineKm, callRoutePoints,
-    routeKm, geoJsonToLatLngs, geometryKm, mapsRouteUrl, normalizeUrl, toast, statusClass
+    routeKm, geometryToFirestore, geometryToGeoJson, geoJsonToLatLngs, geometryKm, mapsRouteUrl, normalizeUrl, toast, statusClass
   };
 }());

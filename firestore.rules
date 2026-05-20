@@ -121,6 +121,18 @@ service cloud.firestore {
       allow delete: if isOwner();
     }
 
+    match /customers/{id} {
+      allow read: if isOffice() || isFinance();
+      allow create, update: if isOffice() || isFinance();
+      allow delete: if isOwner();
+    }
+
+    match /integrationInbox/{id} {
+      allow read: if canOperateCalls() || isFinance();
+      allow create, update: if canOperateCalls();
+      allow delete: if isOwner();
+    }
+
     match /maintenance/{id} {
       allow read: if canManageFleet() || isFinance();
       allow create, update: if canManageFleet();
