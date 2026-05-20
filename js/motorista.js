@@ -1,10 +1,10 @@
 (function () {
   "use strict";
 
-  const { $, esc, money, parseMoney, dateTime, toast, statusClass, routeKm, mapsRouteUrl } = window.JM.utils;
+  const { $, esc, parseMoney, toast, statusClass, routeKm, mapsRouteUrl, statusKey, statusLabel, isFinalStatus } = window.JM.utils;
   const { auth, db, arrayUnion } = window.JM.firebase;
   const cfg = window.JM_CONFIG || {};
-  const DRIVER_FLOW_VERSION = "jm-central-operacional-seguradoras-v15";
+  const DRIVER_FLOW_VERSION = "jm-v16-refino-saas-guincho-seguradoras";
   const state = { user: null, profile: null, calls: {}, vehicles: {}, expenses: {}, settings: {} };
   const unsubscribers = [];
 
@@ -26,6 +26,23 @@
     return ["driver", "motorista"].includes(normalizedRole(role));
   }
 
+  function visibleRows(rows) {
+    return Object.values(rows || {}).filter((row) => row && !row.deletedAt);
+  }
+
+  function mergeNonEmpty(base, override) {
+    const out = Object.assign({}, base || {});
+    Object.entries(override || {}).forEach(([key, value]) => {
+      if (value === "" || value == null) return;
+      out[key] = value;
+    });
+    return out;
+  }
+
+  function activeCloudinaryConfig() {
+    return mergeNonEmpty(cfg.cloudinary || {}, state.settings.cloudinary || {});
+  }
+
   function normalizeDriverProfile(user, data) {
     const profile = Object.assign({}, data || {}, {
       uid: user.uid,
@@ -34,10 +51,10 @@
       active: data && data.active !== false
     });
     if (!isDriverRole(profile.role)) {
-      throw new Error("Este login existe, mas nao esta marcado como motorista.");
+      throw new Error("Este login existe, mas não está marcado como motorista.");
     }
     if (profile.active === false) {
-      throw new Error("Seu usuario nao esta ativo no cadastro da JM Guinchos.");
+      throw new Error("Seu usuário não está ativo no cadastro da JM Guinchos.");
     }
     return profile;
   }
@@ -87,7 +104,7 @@
       await ref.set(repaired, { merge: true });
       return { id: user.uid, ...repaired };
     }
-    throw new Error("Seu motorista existe no Auth, mas nao esta liberado em driverAccess. Recrie/atualize o motorista no jm.html depois de publicar as regras novas.");
+    throw new Error("Seu motorista existe no Auth, mas não está liberado em driverAccess. Recrie/atualize o motorista no jm.html depois de publicar as regras novas.");
   }
 
   function startListeners() {
@@ -109,6 +126,9 @@
       snap.forEach((doc) => { rows[doc.id] = { id: doc.id, ...doc.data() }; });
       state.expenses = rows;
       render();
+    }));
+    unsubscribers.push(db.collection("settings").doc("integrations").onSnapshot((snap) => {
+      state.settings = snap.exists ? snap.data() : {};
     }));
   }
 
@@ -146,7 +166,7 @@
   $("driverRefreshBtn").onclick = () => render();
 
   function activeCalls() {
-    return Object.values(state.calls).filter((c) => !["Finalizado", "Cancelado"].includes(c.status));
+    return visibleRows(state.calls).filter((c) => !isFinalStatus(c));
   }
 
   function render() {
@@ -157,7 +177,7 @@
   }
 
   function renderCalls() {
-    const calls = Object.values(state.calls).sort((a, b) => Number(b.createdAtMs || 0) - Number(a.createdAtMs || 0));
+    const calls = visibleRows(state.calls).sort((a, b) => String(b.createdAt || "").localeCompare(String(a.createdAt || "")));
     $("driverCallsBox").innerHTML = calls.length ? calls.map((call) => {
       const vehicle = state.vehicles[call.vehicleId] || {};
       const url = call.routeExternalUrl || call.routeUrl || mapsRouteUrl(call, vehicle);
@@ -167,38 +187,44 @@
       return `<div class="card" style="margin-bottom:10px">
         <div class="actions" style="justify-content:space-between">
           <div><b>${esc(call.protocolo || call.id)}</b><br><span class="muted small">${esc(call.cliente || "")} - ${esc(vehicle.placa || "")}</span></div>
-          <span class="badge ${statusClass(call.status)}">${esc(call.status || "Novo")}</span>
+          <span class="badge ${statusClass(call)}">${esc(statusLabel(call))}</span>
         </div>
-        <p class="small"><b>Origem:</b> ${esc(call.origem?.label || call.originLabel || "-")}<br><b>Destino:</b> ${esc(call.destino?.label || call.destLabel || "-")}<br><b>Rota:</b> ${esc(metric)} ${routeBadge}<br><b>Acionamento:</b> ${esc(call.source || "Particular")}${call.insurance ? " · " + esc(call.insurance) : ""}${call.insuranceProtocol ? " · Prot. " + esc(call.insuranceProtocol) : ""}<br><b>Veículo cliente:</b> ${esc(call.customerPlate || "-")} ${call.customerVehicle ? "· " + esc(call.customerVehicle) : ""}<br><b>Valor previsto:</b> ${money(call.valor || 0)}</p>
+        <p class="small"><b>Origem:</b> ${esc(call.origem?.label || call.originLabel || "-")}<br><b>Destino:</b> ${esc(call.destino?.label || call.destLabel || "-")}<br><b>Rota:</b> ${esc(metric)} ${routeBadge}<br><b>Acionamento:</b> ${esc(call.source || "Particular")}${call.insurance ? " · " + esc(call.insurance) : ""}${call.insuranceProtocol ? " · Prot. " + esc(call.insuranceProtocol) : ""}<br><b>Veículo cliente:</b> ${esc(call.customerPlate || "-")} ${call.customerVehicle ? "· " + esc(call.customerVehicle) : ""}</p>
         <div class="actions">
           ${url ? `<a class="btn good" target="_blank" href="${esc(url)}">Abrir rota no Maps</a>` : ""}
-          <button class="btn primary" onclick="JM.motorista.setStatus('${esc(call.id)}','Em Rota')">Em rota</button>
-          <button class="btn" onclick="JM.motorista.setStatus('${esc(call.id)}','No Local')">No local</button>
-          <button class="btn" onclick="JM.motorista.setStatus('${esc(call.id)}','Em Transporte')">Transporte</button>
-          <button class="btn good" onclick="JM.motorista.setStatus('${esc(call.id)}','Finalizado')">Finalizar</button>
+          <button class="btn primary" onclick="JM.motorista.setStatus('${esc(call.id)}','motorista_a_caminho')">A caminho</button>
+          <button class="btn" onclick="JM.motorista.setStatus('${esc(call.id)}','motorista_no_local')">No local</button>
+          <button class="btn" onclick="JM.motorista.setStatus('${esc(call.id)}','veiculo_carregado')">Carregado</button>
+          <button class="btn" onclick="JM.motorista.setStatus('${esc(call.id)}','entregue')">Entregue</button>
+          <button class="btn good" onclick="JM.motorista.setStatus('${esc(call.id)}','finalizado')">Finalizar</button>
         </div>
       </div>`;
     }).join("") + `<div class="report-signature">Powered by thIAguinho Soluções Digitais</div>` : `<p class="muted">Nenhum chamado vinculado ao seu usuário.</p>`;
   }
 
   function renderExpenseSelects() {
-    $("driverExpenseCall").innerHTML = `<option value="">Sem chamado</option>` + activeCalls().map((c) => `<option value="${esc(c.id)}">${esc(c.protocolo || c.cliente)}</option>`).join("");
-    $("driverExpenseVehicle").innerHTML = `<option value="">Selecione</option>` + Object.values(state.vehicles).map((v) => `<option value="${esc(v.id)}">${esc(v.placa || v.id)}</option>`).join("");
+    const callOptions = activeCalls().map((c) => `<option value="${esc(c.id)}">${esc(c.protocolo || c.cliente)}</option>`).join("");
+    $("driverExpenseCall").innerHTML = `<option value="">Sem chamado</option>` + callOptions;
+    if ($("driverReportCall")) $("driverReportCall").innerHTML = `<option value="">Selecione</option>` + callOptions;
+    $("driverExpenseVehicle").innerHTML = `<option value="">Selecione</option>` + visibleRows(state.vehicles).map((v) => `<option value="${esc(v.id)}">${esc(v.placa || v.id)}</option>`).join("");
   }
 
   async function setStatus(id, status) {
     const call = state.calls[id];
     if (!call) return;
+    const key = statusKey(status);
+    const label = statusLabel(key);
     await db.collection("calls").doc(id).update({
-      status,
-      updatedAt: Date.now(),
-      timeline: arrayUnion({ at: new Date().toISOString(), by: state.profile.nome || state.user.email, text: "Motorista alterou status para " + status })
+      status: label,
+      statusKey: key,
+      updatedAt: new Date().toISOString(),
+      timeline: arrayUnion({ at: new Date().toISOString(), by: state.profile.nome || state.user.email, text: "Motorista alterou status para " + label })
     });
     toast("Chamado atualizado.", "ok");
   }
 
   async function uploadToCloudinary(file) {
-    const cloud = cfg.cloudinary || {};
+    const cloud = activeCloudinaryConfig();
     if (!file || !cloud.cloudName || !cloud.uploadPreset) return "";
     const form = new FormData();
     form.append("file", file);
@@ -231,6 +257,29 @@
     e.target.reset();
     toast("Despesa enviada para aprovação.", "ok");
   };
+
+  $("driverReportForm") && ($("driverReportForm").onsubmit = async (e) => {
+    e.preventDefault();
+    const callId = $("driverReportCall").value;
+    const call = state.calls[callId];
+    if (!call) return toast("Selecione um chamado ativo para enviar relatório.", "danger");
+    const photo = $("driverReportPhoto").files && $("driverReportPhoto").files[0];
+    let photoUrl = "";
+    try { photoUrl = await uploadToCloudinary(photo); } catch (err) { toast("Foto não enviada: " + err.message, "danger"); }
+    await db.collection("calls").doc(callId).update({
+      driverReports: arrayUnion({
+        at: new Date().toISOString(),
+        by: state.profile.nome || state.user.email,
+        checklist: $("driverReportChecklist").value,
+        notes: $("driverReportNotes").value.trim(),
+        photoUrl
+      }),
+      timeline: arrayUnion({ at: new Date().toISOString(), by: state.profile.nome || state.user.email, text: "Motorista enviou relatório/checklist" }),
+      updatedAt: new Date().toISOString()
+    });
+    e.target.reset();
+    toast("Relatório enviado para a central.", "ok");
+  });
 
   window.JM = window.JM || {};
   window.JM.motorista = { setStatus, state };

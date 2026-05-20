@@ -5,9 +5,9 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#07111f">
   <title>JM Guinchos - Gestor</title>
-  <link rel="manifest" href="manifest.json?v=jm-central-operacional-seguradoras-v15">
+  <link rel="manifest" href="manifest.json?v=jm-v16-refino-saas-guincho-seguradoras">
   <link rel="icon" href="assets/icon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="css/style.css?v=jm-central-operacional-seguradoras-v15">
+  <link rel="stylesheet" href="css/style.css?v=jm-v16-refino-saas-guincho-seguradoras">
 </head>
 <body>
   <section id="loginView" class="login">
@@ -96,14 +96,25 @@
                 <select id="opsStatusFilter" aria-label="Filtro de status operacional">
                   <option value="ativos">Chamados ativos</option>
                   <option value="todos">Todos</option>
-                  <option value="Aguardando Despacho">Aguardando Despacho</option>
-                  <option value="Despachado">Despachado</option>
-                  <option value="Em Rota">Em Rota</option>
-                  <option value="No Local">No Local</option>
-                  <option value="Em Transporte">Em Transporte</option>
-                  <option value="Finalizado">Finalizado</option>
-                  <option value="Cancelado">Cancelado</option>
+                  <option value="aguardando_despacho">Aguardando despacho</option>
+                  <option value="despachado">Despachado</option>
+                  <option value="motorista_a_caminho">Motorista a caminho</option>
+                  <option value="motorista_no_local">Motorista no local</option>
+                  <option value="veiculo_carregado">Veículo carregado</option>
+                  <option value="em_transporte">Em transporte</option>
+                  <option value="entregue">Entregue</option>
+                  <option value="finalizado">Finalizado</option>
+                  <option value="cancelado">Cancelado</option>
                 </select>
+                <select id="opsPriorityFilter" aria-label="Filtro de prioridade">
+                  <option value="">Todas prioridades</option>
+                  <option value="normal">Normal</option>
+                  <option value="alta">Alta</option>
+                  <option value="urgente">Urgente</option>
+                </select>
+                <select id="opsInsuranceFilter" aria-label="Filtro de seguradora"></select>
+                <select id="opsDriverFilter" aria-label="Filtro de motorista"></select>
+                <select id="opsVehicleFilter" aria-label="Filtro de veículo"></select>
                 <button class="btn primary" id="btnOpsRefreshTracker" type="button">Atualizar Tracker</button>
                 <button class="btn" id="btnOpsNewCall" type="button">Novo chamado</button>
               </div>
@@ -155,6 +166,10 @@
                 <div><label>Seguradora / assistência</label><input id="callInsurance" placeholder="Ex: Porto, Allianz, Suhai..."></div>
                 <div><label>Protocolo seguradora</label><input id="callInsuranceProtocol" placeholder="Protocolo / acionamento"></div>
                 <div><label>Sinistro / apólice</label><input id="callPolicy" placeholder="Sinistro, apólice ou OS externa"></div>
+                <div><label>Nº sinistro</label><input id="callClaim" placeholder="Sinistro"></div>
+                <div><label>Nº apólice</label><input id="callPolicyNumber" placeholder="Apólice"></div>
+                <div><label>Prazo SLA</label><input id="callSlaLimit" type="datetime-local"></div>
+                <div><label>Status cobrança</label><select id="callBillingStatus"><option value="aberto">Aberto</option><option value="a_faturar">A faturar</option><option value="faturado">Faturado</option><option value="recebido">Recebido</option><option value="glosado">Glosado</option></select></div>
                 <div><label>Placa do cliente</label><input id="callCustomerPlate" placeholder="ABC1D23"></div>
                 <div><label>Veículo do cliente</label><input id="callCustomerVehicle" placeholder="Modelo / cor / observação"></div>
                 <div><label>Excedente KM</label><input id="callExtraKm" inputmode="decimal" placeholder="0"></div>
@@ -239,7 +254,12 @@
                 <div class="wide"><label>Descrição</label><input id="finDesc" required></div>
                 <div><label>Valor</label><input id="finAmount" inputmode="decimal" required></div>
                 <div><label>Status</label><select id="finStatus"><option>Recebido</option><option>A receber</option><option>Pago</option><option>Pendente</option></select></div>
+                <div><label>Categoria</label><input id="finCategory" placeholder="Combustível, seguradora, manutenção..."></div>
+                <div><label>Chamado</label><select id="finCall"></select></div>
+                <div><label>Veículo</label><select id="finVehicle"></select></div>
+                <div><label>Motorista</label><select id="finDriver"></select></div>
                 <button class="btn primary wide" type="submit">Salvar financeiro</button>
+                <button class="btn wide hidden" id="financeCancelEdit" type="button">Cancelar edição</button>
               </form>
             </div>
             <div class="panel col-8">
@@ -259,6 +279,7 @@
                 <div><label>Placa</label><input id="vehiclePlate" maxlength="8" required></div>
                 <div><label>Apelido</label><input id="vehicleAlias"></div>
                 <div><label>Tipo</label><input id="vehicleType"></div>
+                <div><label>Tracker ID / deviceId</label><input id="vehicleTrackerId" placeholder="81 ou uniqueId"></div>
                 <div><label>Status</label><select id="vehicleStatus"><option>Disponível</option><option>Em atendimento</option><option>Manutenção</option><option>Indisponível</option></select></div>
                 <button class="btn primary wide" type="submit">Salvar veículo</button>
               </form>
@@ -266,6 +287,23 @@
             <div class="panel col-8">
               <h2>Frota JM</h2>
               <div id="fleetTable" class="table-wrap"></div>
+            </div>
+            <div class="panel col-4">
+              <h2>Manutenção</h2>
+              <form id="maintenanceForm" class="form-grid">
+                <div class="wide"><label>Veículo</label><select id="maintenanceVehicle"></select></div>
+                <div><label>Data</label><input id="maintenanceDate" type="date"></div>
+                <div><label>Status</label><select id="maintenanceStatus"><option value="aberta">Aberta</option><option value="agendada">Agendada</option><option value="concluida">Concluída</option></select></div>
+                <div class="wide"><label>Serviço</label><input id="maintenanceDesc" placeholder="Troca de óleo, pneu, revisão..."></div>
+                <div><label>KM</label><input id="maintenanceKm" inputmode="numeric" placeholder="123000"></div>
+                <div><label>Custo</label><input id="maintenanceCost" inputmode="decimal" placeholder="0,00"></div>
+                <button class="btn primary wide" type="submit">Salvar manutenção</button>
+                <button class="btn wide hidden" id="maintenanceCancelEdit" type="button">Cancelar edição</button>
+              </form>
+            </div>
+            <div class="panel col-8">
+              <h2>Histórico de manutenção</h2>
+              <div id="maintenanceTable" class="table-wrap"></div>
             </div>
           </div>
         </section>
@@ -297,15 +335,15 @@
   <footer class="signature-footer">Powered by thIAguinho Soluções Digitais</footer>
   <div id="toast" class="toast"></div>
 
-  <script src="js/config.firebase.js?v=jm-central-operacional-seguradoras-v15"></script>
+  <script src="js/config.firebase.js?v=jm-v16-refino-saas-guincho-seguradoras"></script>
   <script src="https://www.gstatic.com/firebasejs/10.12.5/firebase-app-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/10.12.5/firebase-auth-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/10.12.5/firebase-firestore-compat.js"></script>
-  <script src="js/utils.js?v=jm-central-operacional-seguradoras-v15"></script>
-  <script src="js/firebase.js?v=jm-central-operacional-seguradoras-v15"></script>
-  <script src="js/tracker.js?v=jm-central-operacional-seguradoras-v15"></script>
-  <script src="js/google-maps.js?v=jm-central-operacional-seguradoras-v15"></script>
-  <script src="js/mapa.js?v=jm-central-operacional-seguradoras-v15"></script>
-  <script src="js/app.js?v=jm-central-operacional-seguradoras-v15"></script>
+  <script src="js/utils.js?v=jm-v16-refino-saas-guincho-seguradoras"></script>
+  <script src="js/firebase.js?v=jm-v16-refino-saas-guincho-seguradoras"></script>
+  <script src="js/tracker.js?v=jm-v16-refino-saas-guincho-seguradoras"></script>
+  <script src="js/google-maps.js?v=jm-v16-refino-saas-guincho-seguradoras"></script>
+  <script src="js/mapa.js?v=jm-v16-refino-saas-guincho-seguradoras"></script>
+  <script src="js/app.js?v=jm-v16-refino-saas-guincho-seguradoras"></script>
 </body>
 </html>

@@ -1,4 +1,8 @@
-# JM Guinchos v16 - gestão, equipe e Trackar/Traccar
+# JM Guinchos V16 - refino SaaS para guincho, seguradoras e operação 24h
+
+Esta entrega consolida a V15 como `JM-GUINCHOS-v16-refino-saas-guincho-seguradoras`.
+
+Leia também `ENTREGA_V16.md` para lista de arquivos alterados, checklist por perfil, instruções de Firestore, cache/PWA e roteiro de teste real.
 
 Esta versão mantém o sistema em frontend estático/GitHub Pages, mas separa melhor os papéis:
 
@@ -8,13 +12,16 @@ Esta versão mantém o sistema em frontend estático/GitHub Pages, mas separa me
 - O admin/dono no `jm.html` cadastra, edita e remove motorista, gerente, atendente e financeiro.
 - O admin/dono pode editar e excluir chamados.
 - O token do rastreador não fica mais hardcoded no `js/config.firebase.js`.
+- Chamados, financeiro, despesas, manutenção e equipe passam a ter exclusão operacional com auditoria em `auditLogs`.
+- Motorista não visualiza valor/lucro do chamado e envia relatório/checklist/foto para a central.
+- Central Operacional ganha filtros por status, prioridade, seguradora, motorista e veículo.
 
 ## Publicação Obrigatória
 
 1. Suba todos os arquivos desta pasta.
 2. Publique o conteúdo de `firestore.rules` no Firebase Console.
 3. Ative login Email/Senha no Firebase Authentication.
-4. Abra `superadmin.html?v=jm-admin-actions-v16`.
+4. Abra `superadmin.html?v=jm-v16-refino-saas-guincho-seguradoras`.
 5. Entre/crie o primeiro superadmin com `tsvalencio@gmail.com`.
 6. Em Tracker, salve:
    - plataforma: `https://gps2.rafacarrastreadores.com.br`
@@ -25,7 +32,7 @@ Esta versão mantém o sistema em frontend estático/GitHub Pages, mas separa me
    - polling: `30000` ou maior
 7. Em Rastreadores da frota, informe o `deviceId` ou `uniqueId` real do Traccar para a placa correta.
 8. Clique em `Criar base JM` e depois em `Sincronizar Tracker`.
-9. Abra `jm.html?v=jm-admin-actions-v16` e entre com `jm@jm.com`.
+9. Abra `jm.html?v=jm-v16-refino-saas-guincho-seguradoras` e entre com `jm@jm.com`.
 
 ## Device Trackar Validado
 
@@ -40,7 +47,7 @@ O token informado no chat deve ser considerado exposto. Para operação profissi
 
 Como este projeto ainda roda em frontend estático, qualquer token salvo no app pode ser lido por usuários autenticados com acesso ao painel. A evolução profissional correta é mover a chamada ao Trackar para uma Cloud Function ou backend proxy.
 
-Ao excluir um funcionário no `jm.html`, o app remove o cadastro operacional e as permissões em `managerAccess`/`driverAccess`. A conta do Firebase Authentication só pode ser apagada com Admin SDK, Cloud Function ou manualmente no Console Firebase.
+Ao excluir um funcionário no `jm.html`, o app desativa o cadastro operacional, grava auditoria e remove as permissões em `managerAccess`/`driverAccess`. A conta do Firebase Authentication só pode ser apagada com Admin SDK, Cloud Function ou manualmente no Console Firebase.
 
 ## Verificação Local
 
@@ -79,7 +86,7 @@ Arquivos alterados na v14:
 - `README_JM_GUINCHOS.md`
 - `DEVTOOLS_TEST_JM_GUINCHOS.js`
 
-## JM Guinchos v15 — Central Operacional para seguradoras e assistências
+## JM Guinchos v16 — Central Operacional para seguradoras e assistências
 
 Esta versão evolui o sistema para um modelo de central de despacho profissional, inspirado em sistemas de pátio/guincho, mas mantendo a arquitetura barata do projeto: GitHub Pages, Firebase, Leaflet/OpenStreetMap, OSRM gratuito e Tracker RAFA.
 
@@ -104,10 +111,10 @@ Principais recursos adicionados:
   - veículo do cliente;
   - excedente KM.
 
-A v15 não remove a V14. As rotas por ruas/rodovias continuam usando OSM/OSRM sem API paga. O link compartilhado do Google Maps/Waze continua sendo salvo como link externo para navegação.
+A v16 não remove a V14. As rotas por ruas/rodovias continuam usando OSM/OSRM sem API paga. O link compartilhado do Google Maps/Waze continua sendo salvo como link externo para navegação.
 
 Versão de cache/PWA:
 
 ```txt
-jm-central-operacional-seguradoras-v15
+jm-v16-refino-saas-guincho-seguradoras
 ```

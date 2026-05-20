@@ -214,6 +214,20 @@ td { font-size: .88rem; }
 .fallback-map { width: 100%; height: 100%; display: block; }
 .timeline { display: grid; gap: 8px; }
 .timeline-item { padding: 10px; border-left: 3px solid var(--accent); background: rgba(255,255,255,.03); border-radius: 0 var(--radius) var(--radius) 0; }
+.finance-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+.finance-summary span {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: rgba(255,255,255,.03);
+  padding: 9px 11px;
+  color: var(--muted);
+}
+.finance-summary b { color: var(--text); }
 
 .mobile-top { display: none; }
 .toast {
@@ -335,7 +349,7 @@ td { font-size: .88rem; }
   .route-planner .actions .btn, .geo-actions .btn { width: 100%; justify-content: center; }
 }
 
-/* JM v15 - Central operacional para guinchos, seguradoras e assistências */
+/* JM v16 - Central operacional para guinchos, seguradoras e assistências */
 .ops-shell { display: grid; gap: 14px; }
 .ops-head {
   display: flex;

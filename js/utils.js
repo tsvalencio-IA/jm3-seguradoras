@@ -23,13 +23,24 @@
   }
 
   function money(value) {
-    const n = Number(String(value || 0).replace(/\./g, "").replace(",", ".")) || 0;
+    const n = typeof value === "number" ? value : parseMoney(value);
     return BRL.format(n);
   }
 
   function parseMoney(value) {
     if (typeof value === "number") return value;
-    return Number(String(value || "0").replace(/[^\d,.-]/g, "").replace(/\./g, "").replace(",", ".")) || 0;
+    let raw = String(value || "0").trim().replace(/[^\d,.-]/g, "");
+    if (!raw) return 0;
+    const negative = raw.includes("-");
+    raw = raw.replace(/-/g, "");
+    if (raw.includes(",")) {
+      raw = raw.replace(/\./g, "").replace(",", ".");
+    } else {
+      const dotParts = raw.split(".");
+      if (dotParts.length > 2) raw = dotParts.join("");
+    }
+    const parsed = Number(raw);
+    return Number.isFinite(parsed) ? (negative ? -parsed : parsed) : 0;
   }
 
   function dateTime(value) {
@@ -51,6 +62,107 @@
 
   function plateKey(value) {
     return slug(value || "").slice(0, 7);
+  }
+
+  function isValidPlate(value) {
+    const plate = plateKey(value);
+    return /^[A-Z]{3}[0-9]{4}$/.test(plate) || /^[A-Z]{3}[0-9][A-Z][0-9]{2}$/.test(plate);
+  }
+
+  function digits(value) {
+    return String(value || "").replace(/\D+/g, "");
+  }
+
+  function maskPhone(value) {
+    const d = digits(value).slice(0, 11);
+    if (d.length <= 10) return d.replace(/^(\d{0,2})(\d{0,4})(\d{0,4}).*/, (_, a, b, c) => [a && "(" + a, a && a.length === 2 ? ") " : "", b, c && "-" + c].join(""));
+    return d.replace(/^(\d{0,2})(\d{0,5})(\d{0,4}).*/, (_, a, b, c) => [a && "(" + a, a && a.length === 2 ? ") " : "", b, c && "-" + c].join(""));
+  }
+
+  function phoneWhatsappUrl(value, message) {
+    const d = digits(value);
+    if (d.length < 10) return "";
+    const full = d.startsWith("55") ? d : "55" + d;
+    return "https://wa.me/" + full + (message ? "?text=" + encodeURIComponent(message) : "");
+  }
+
+  function maskCpf(value) {
+    return digits(value).slice(0, 11)
+      .replace(/^(\d{3})(\d)/, "$1.$2")
+      .replace(/^(\d{3})\.(\d{3})(\d)/, "$1.$2.$3")
+      .replace(/\.(\d{3})(\d)/, ".$1-$2");
+  }
+
+  function maskCnpj(value) {
+    return digits(value).slice(0, 14)
+      .replace(/^(\d{2})(\d)/, "$1.$2")
+      .replace(/^(\d{2})\.(\d{3})(\d)/, "$1.$2.$3")
+      .replace(/\.(\d{3})(\d)/, ".$1/$2")
+      .replace(/(\d{4})(\d)/, "$1-$2");
+  }
+
+  function validateCpf(value) {
+    const d = digits(value);
+    if (d.length !== 11 || /^(\d)\1+$/.test(d)) return false;
+    let sum = 0;
+    for (let i = 0; i < 9; i += 1) sum += Number(d[i]) * (10 - i);
+    let check = (sum * 10) % 11;
+    if (check === 10) check = 0;
+    if (check !== Number(d[9])) return false;
+    sum = 0;
+    for (let i = 0; i < 10; i += 1) sum += Number(d[i]) * (11 - i);
+    check = (sum * 10) % 11;
+    if (check === 10) check = 0;
+    return check === Number(d[10]);
+  }
+
+  function validateCnpj(value) {
+    const d = digits(value);
+    if (d.length !== 14 || /^(\d)\1+$/.test(d)) return false;
+    const calc = (len) => {
+      const weights = len === 12 ? [5,4,3,2,9,8,7,6,5,4,3,2] : [6,5,4,3,2,9,8,7,6,5,4,3,2];
+      const sum = weights.reduce((acc, weight, index) => acc + Number(d[index]) * weight, 0);
+      const rest = sum % 11;
+      return rest < 2 ? 0 : 11 - rest;
+    };
+    return calc(12) === Number(d[12]) && calc(13) === Number(d[13]);
+  }
+
+  const STATUS_DEFS = {
+    aguardando_despacho: "Aguardando despacho",
+    despachado: "Despachado",
+    motorista_a_caminho: "Motorista a caminho",
+    motorista_no_local: "Motorista no local",
+    veiculo_carregado: "Veículo carregado",
+    em_transporte: "Em transporte",
+    entregue: "Entregue",
+    finalizado: "Finalizado",
+    cancelado: "Cancelado"
+  };
+
+  function statusKey(value) {
+    const raw = String(value && (value.statusKey || value.status) || value || "").toLowerCase()
+      .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+      .replace(/[^a-z0-9]+/g, "_")
+      .replace(/^_+|_+$/g, "");
+    if (!raw || raw === "novo") return "aguardando_despacho";
+    if (raw.includes("cancel")) return "cancelado";
+    if (raw.includes("final")) return "finalizado";
+    if (raw.includes("entreg")) return "entregue";
+    if (raw.includes("carreg")) return "veiculo_carregado";
+    if (raw.includes("local")) return "motorista_no_local";
+    if (raw.includes("transporte")) return "em_transporte";
+    if (raw.includes("rota") || raw.includes("caminho") || raw.includes("atendimento")) return "motorista_a_caminho";
+    if (raw.includes("despach")) return "despachado";
+    return STATUS_DEFS[raw] ? raw : "aguardando_despacho";
+  }
+
+  function statusLabel(value) {
+    return STATUS_DEFS[statusKey(value)] || "Aguardando despacho";
+  }
+
+  function isFinalStatus(value) {
+    return ["finalizado", "cancelado"].includes(statusKey(value));
   }
 
   function uidSafe(value) {
@@ -175,17 +287,19 @@
   }
 
   function statusClass(status) {
-    const key = String(status || "").toLowerCase();
-    if (key.includes("final")) return "ok";
-    if (key.includes("cancel")) return "danger";
-    if (key.includes("atendimento") || key.includes("rota")) return "info";
-    if (key.includes("despach")) return "warn";
+    const key = statusKey(status);
+    if (["finalizado", "entregue"].includes(key)) return "ok";
+    if (key === "cancelado") return "danger";
+    if (["motorista_a_caminho", "motorista_no_local", "veiculo_carregado", "em_transporte"].includes(key)) return "info";
+    if (key === "despachado" || key === "aguardando_despacho") return "warn";
     return "muted";
   }
 
   window.JM = window.JM || {};
   window.JM.utils = {
     $, $all, esc, money, parseMoney, dateTime, todayInput, slug, plateKey,
+    isValidPlate, digits, maskPhone, phoneWhatsappUrl, maskCpf, maskCnpj, validateCpf, validateCnpj,
+    STATUS_DEFS, statusKey, statusLabel, isFinalStatus,
     uidSafe, coords, pointFrom, isPoint, roundPoint, haversineKm, callRoutePoints,
     routeKm, geoJsonToLatLngs, geometryKm, mapsRouteUrl, normalizeUrl, toast, statusClass
   };

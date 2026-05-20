@@ -5,9 +5,9 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#07111f">
   <title>JM Guinchos - Motorista</title>
-  <link rel="manifest" href="manifest.json?v=jm-central-operacional-seguradoras-v15">
+  <link rel="manifest" href="manifest.json?v=jm-v16-refino-saas-guincho-seguradoras">
   <link rel="icon" href="assets/icon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="css/style.css?v=jm-central-operacional-seguradoras-v15">
+  <link rel="stylesheet" href="css/style.css?v=jm-v16-refino-saas-guincho-seguradoras">
 </head>
 <body>
   <section id="driverLoginView" class="login">
@@ -59,6 +59,16 @@
             <button class="btn good wide" type="submit">Enviar relatório</button>
           </form>
         </section>
+        <section class="panel col-5">
+          <h2>Relatório do atendimento</h2>
+          <form id="driverReportForm" class="form-grid">
+            <div class="wide"><label>Chamado</label><select id="driverReportCall"></select></div>
+            <div><label>Checklist</label><select id="driverReportChecklist"><option value="ok">Sem avarias aparentes</option><option value="avaria">Com avaria registrada</option><option value="recusa">Cliente recusou assinatura/foto</option></select></div>
+            <div class="wide"><label>Foto/comprovante</label><input id="driverReportPhoto" type="file" accept="image/*" capture="environment"></div>
+            <div class="wide"><label>Observação</label><textarea id="driverReportNotes" placeholder="Resumo objetivo do atendimento"></textarea></div>
+            <button class="btn primary wide" type="submit">Enviar relatório</button>
+          </form>
+        </section>
         <section class="panel col-12">
           <h2>Mapa dos meus atendimentos</h2>
           <p class="muted small">O motorista visualiza somente os próprios chamados. A rota interna usa OpenStreetMap/OSRM e o botão abre navegação externa no Maps/Waze quando houver link salvo.</p>
@@ -71,14 +81,14 @@
   <footer class="signature-footer">Powered by thIAguinho Soluções Digitais</footer>
   <div id="toast" class="toast"></div>
 
-  <script src="js/config.firebase.js?v=jm-central-operacional-seguradoras-v15"></script>
+  <script src="js/config.firebase.js?v=jm-v16-refino-saas-guincho-seguradoras"></script>
   <script src="https://www.gstatic.com/firebasejs/10.12.5/firebase-app-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/10.12.5/firebase-auth-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/10.12.5/firebase-firestore-compat.js"></script>
-  <script src="js/utils.js?v=jm-central-operacional-seguradoras-v15"></script>
-  <script src="js/firebase.js?v=jm-central-operacional-seguradoras-v15"></script>
-  <script src="js/google-maps.js?v=jm-central-operacional-seguradoras-v15"></script>
-  <script src="js/mapa.js?v=jm-central-operacional-seguradoras-v15"></script>
-  <script src="js/motorista.js?v=jm-central-operacional-seguradoras-v15"></script>
+  <script src="js/utils.js?v=jm-v16-refino-saas-guincho-seguradoras"></script>
+  <script src="js/firebase.js?v=jm-v16-refino-saas-guincho-seguradoras"></script>
+  <script src="js/google-maps.js?v=jm-v16-refino-saas-guincho-seguradoras"></script>
+  <script src="js/mapa.js?v=jm-v16-refino-saas-guincho-seguradoras"></script>
+  <script src="js/motorista.js?v=jm-v16-refino-saas-guincho-seguradoras"></script>
 </body>
 </html>

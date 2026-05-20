@@ -1,11 +1,15 @@
 (function () {
   "use strict";
 
-  const { $, $all, esc, money, parseMoney, dateTime, todayInput, plateKey, uidSafe, coords, pointFrom, callRoutePoints, routeKm, mapsRouteUrl, normalizeUrl, toast, statusClass } = window.JM.utils;
+  const {
+    $, $all, esc, money, parseMoney, dateTime, todayInput, plateKey, isValidPlate,
+    uidSafe, coords, pointFrom, routeKm, mapsRouteUrl, normalizeUrl, toast, statusClass,
+    statusKey, statusLabel, isFinalStatus: utilIsFinalStatus, maskPhone, phoneWhatsappUrl
+  } = window.JM.utils;
   const { auth, secondaryAuth, db, ts, arrayUnion, emailIsAdmin } = window.JM.firebase;
   const cfg = window.JM_CONFIG || {};
   const SYSTEM_SIGNATURE = "Powered by thIAguinho Soluções Digitais";
-  const LOGIN_FLOW_VERSION = "jm-central-operacional-seguradoras-v15";
+  const LOGIN_FLOW_VERSION = "jm-v16-refino-saas-guincho-seguradoras";
   let trackerTimer = null;
   let trackerBusy = false;
 
@@ -17,19 +21,29 @@
     users: {},
     expenses: {},
     transactions: {},
+    maintenance: {},
     settings: {},
     addresses: { origin: null, destination: null, waypoints: [] },
     smartRoute: null,
     selectedCallId: null,
     selectedVehicleId: null,
     operationFilter: "ativos",
+    operationPriorityFilter: "",
+    operationInsuranceFilter: "",
+    operationDriverFilter: "",
+    operationVehicleFilter: "",
     editingCallId: null,
-    editingUserId: null
+    editingUserId: null,
+    editingTransactionId: null,
+    editingMaintenanceId: null
   };
 
   const unsubscribers = [];
   const OFFICE_ROLES = ["admin", "finance", "gestor", "owner", "manager", "gerente", "auxiliar", "atendente"];
-  const MANAGER_ROLES = ["admin", "finance", "gestor", "owner", "manager", "gerente"];
+  const OWNER_ROLES = ["admin", "superadmin", "gestor", "owner", "manager"];
+  const FINANCE_ROLES = ["admin", "superadmin", "gestor", "owner", "manager", "finance"];
+  const FLEET_ROLES = ["admin", "superadmin", "gestor", "owner", "manager", "gerente"];
+  const OPERATIONS_ROLES = ["admin", "superadmin", "gestor", "owner", "manager", "gerente", "auxiliar", "atendente"];
   const DRIVER_ROLES = ["driver", "motorista"];
 
   function normalizedRole(role) {
@@ -40,23 +54,48 @@
     return state.profile && OFFICE_ROLES.includes(normalizedRole(state.profile.role));
   }
 
+  function hasRole(list) {
+    return state.profile && list.includes(normalizedRole(state.profile.role));
+  }
+
+  function canOwnCompany() {
+    return hasRole(OWNER_ROLES);
+  }
+
   function isAdmin() {
-    return state.profile && MANAGER_ROLES.includes(normalizedRole(state.profile.role));
+    return canOwnCompany();
+  }
+
+  function canOperateCalls() {
+    return hasRole(OPERATIONS_ROLES) || hasRole(FINANCE_ROLES);
+  }
+
+  function canManageFinance() {
+    return hasRole(FINANCE_ROLES);
+  }
+
+  function canManageFleet() {
+    return hasRole(FLEET_ROLES);
+  }
+
+  function canManageTeam() {
+    return canOwnCompany();
+  }
+
+  function canSeeSensitiveFinance() {
+    return canManageFinance();
   }
 
   function isFinalStatus(status) {
-    return ["Finalizado", "Cancelado"].includes(String(status || ""));
+    return utilIsFinalStatus(status);
   }
 
   function operationalStatus(status) {
-    const raw = String(status || "").toLowerCase();
-    if (raw.includes("final")) return "Finalizado";
-    if (raw.includes("cancel")) return "Cancelado";
-    if (raw.includes("local")) return "No Local";
-    if (raw.includes("transporte") || raw.includes("entreg")) return "Em Transporte";
-    if (raw.includes("rota") || raw.includes("caminho") || raw.includes("atendimento")) return "Em Rota";
-    if (raw.includes("despach")) return "Despachado";
-    return "Aguardando Despacho";
+    return statusLabel(status);
+  }
+
+  function operationalKey(status) {
+    return statusKey(status);
   }
 
   function priorityWeight(call) {
@@ -80,7 +119,7 @@
   }
 
   function canManageTracker() {
-    return state.profile && MANAGER_ROLES.includes(normalizedRole(state.profile.role));
+    return canOwnCompany() || normalizedRole(state.profile && state.profile.role) === "gerente";
   }
 
   function activeCloudinaryConfig() {
@@ -106,6 +145,75 @@
 
   function activeTrackerSettings() {
     return mergeNonEmpty(cfg.tracker || {}, state.settings.tracker || {});
+  }
+
+  function visibleRows(rows) {
+    return Object.values(rows || {}).filter((row) => row && !row.deletedAt);
+  }
+
+  function personName() {
+    return state.profile && (state.profile.nome || state.profile.email) || state.user && state.user.email || "sistema";
+  }
+
+  async function writeAudit(action, collectionName, docId, oldData, reason) {
+    try {
+      await db.collection("auditLogs").add({
+        action,
+        collection: collectionName,
+        docId,
+        reason: reason || "",
+        oldData: oldData || null,
+        profileRole: state.profile && state.profile.role || "",
+        byUid: state.user && state.user.uid || "",
+        byEmail: state.user && state.user.email || "",
+        byName: personName(),
+        createdAt: new Date().toISOString()
+      });
+    } catch (err) {
+      console.warn("Falha ao gravar auditoria", err);
+      toast("A ação foi preparada, mas a auditoria foi bloqueada. Publique as firestore.rules da V16 antes de operar exclusões.", "danger");
+      throw err;
+    }
+  }
+
+  async function softDeleteDoc(collectionName, id, oldData, reason) {
+    await writeAudit("delete", collectionName, id, oldData, reason);
+    await db.collection(collectionName).doc(id).set({
+      deletedAt: new Date().toISOString(),
+      deletedBy: state.user.uid,
+      deletedByEmail: state.user.email,
+      auditReason: reason || ""
+    }, { merge: true });
+  }
+
+  function currentStatusKey(call) {
+    return operationalKey(call && (call.statusKey || call.status));
+  }
+
+  function slaInfo(call) {
+    if (!call || !call.slaLimitAt) return { label: "Sem SLA", className: "muted", overdue: false };
+    const limit = new Date(call.slaLimitAt);
+    if (Number.isNaN(limit.getTime())) return { label: "SLA inválido", className: "warn", overdue: false };
+    const diff = limit.getTime() - Date.now();
+    if (isFinalStatus(call)) return { label: "SLA encerrado", className: "ok", overdue: false };
+    if (diff < 0) return { label: "SLA vencido", className: "danger", overdue: true };
+    const minutes = Math.ceil(diff / 60000);
+    if (minutes <= 30) return { label: "SLA em " + minutes + " min", className: "warn", overdue: false };
+    const hours = Math.floor(minutes / 60);
+    const rest = minutes % 60;
+    return { label: "SLA em " + (hours ? hours + "h " : "") + rest + "min", className: "ok", overdue: false };
+  }
+
+  function setButtonBusy(button, busy, text) {
+    if (!button) return;
+    if (busy) {
+      button.dataset.originalText = button.textContent;
+      button.disabled = true;
+      button.textContent = text || "Aguarde...";
+    } else {
+      button.disabled = false;
+      if (button.dataset.originalText) button.textContent = button.dataset.originalText;
+    }
   }
 
   function addressStatus(id, message, type) {
@@ -373,6 +481,11 @@
     });
     $("menuBtn").onclick = () => document.body.classList.toggle("menu-open");
     if ($("opsStatusFilter")) $("opsStatusFilter").onchange = (e) => { state.operationFilter = e.target.value || "ativos"; renderOperations(); refreshMaps(); };
+    ["Priority", "Insurance", "Driver", "Vehicle"].forEach((name) => {
+      const id = "ops" + name + "Filter";
+      const key = "operation" + name + "Filter";
+      if ($(id)) $(id).onchange = (e) => { state[key] = e.target.value || ""; renderOperations(); refreshMaps(); };
+    });
     if ($("btnOpsRefreshTracker")) $("btnOpsRefreshTracker").onclick = () => syncTrackerNow(true);
     if ($("btnOpsNewCall")) $("btnOpsNewCall").onclick = () => showView("chamados");
     if ($("btnOpsAssignVehicle")) $("btnOpsAssignVehicle").onclick = assignSelectedVehicleToSelectedCall;
@@ -412,6 +525,35 @@
     if ($("teamPass")) $("teamPass").placeholder = "mínimo 6 caracteres";
     setSubmitText("teamForm", "Criar/atualizar equipe");
     if ($("teamCancelEdit")) $("teamCancelEdit").classList.add("hidden");
+  }
+
+  function resetFinanceForm() {
+    if ($("financeForm")) $("financeForm").reset();
+    state.editingTransactionId = null;
+    setSubmitText("financeForm", "Salvar financeiro");
+    if ($("financeCancelEdit")) $("financeCancelEdit").classList.add("hidden");
+    if ($("finDate")) $("finDate").value = todayInput();
+  }
+
+  function resetMaintenanceForm() {
+    if ($("maintenanceForm")) $("maintenanceForm").reset();
+    state.editingMaintenanceId = null;
+    setSubmitText("maintenanceForm", "Salvar manutenção");
+    if ($("maintenanceCancelEdit")) $("maintenanceCancelEdit").classList.add("hidden");
+    if ($("maintenanceDate")) $("maintenanceDate").value = todayInput();
+  }
+
+  function bindInputMasks() {
+    const phone = $("callPhone");
+    if (phone) phone.oninput = () => { phone.value = maskPhone(phone.value); };
+    ["callCustomerPlate", "vehiclePlate"].forEach((id) => {
+      const el = $(id);
+      if (el) el.oninput = () => { el.value = plateKey(el.value); };
+    });
+    ["callPrice", "callExtraKm", "finAmount", "maintenanceCost"].forEach((id) => {
+      const el = $(id);
+      if (el) el.onblur = () => { if (el.value) el.value = String(parseMoney(el.value)).replace(".", ","); };
+    });
   }
 
   function reportSignature() {
@@ -586,7 +728,8 @@
   function startListeners() {
     unsubscribers.splice(0).forEach((fn) => fn());
     const baseCollections = ["vehicles", "calls", "users"];
-    if (isAdmin()) baseCollections.push("expenses", "transactions");
+    if (canManageFinance()) baseCollections.push("expenses", "transactions");
+    if (canManageFleet() || canManageFinance()) baseCollections.push("maintenance");
     baseCollections.forEach((name) => listenCollection(name, name));
     const settingsUnsub = db.collection("settings").doc("integrations").onSnapshot((snap) => {
       state.settings = snap.exists ? snap.data() : {};
@@ -603,13 +746,21 @@
   }
 
   function applyRoleVisibility() {
-    const allowed = isAdmin();
-    ["financeiro", "frota", "equipe"].forEach((view) => {
+    const visibility = {
+      financeiro: canManageFinance(),
+      frota: canManageFleet(),
+      equipe: canManageTeam()
+    };
+    Object.entries(visibility).forEach(([view, allowed]) => {
       const btn = document.querySelector(`#navButtons button[data-view="${view}"]`);
       if (btn) btn.classList.toggle("hidden", !allowed);
     });
     // Importante: nunca redirecionar o jm.html para motorista.html.
-    if (!allowed) showView("dashboard");
+    const active = document.querySelector(".view.active");
+    if (active) {
+      const current = active.id.replace("view-", "");
+      if (visibility[current] === false) showView("dashboard");
+    }
   }
 
   auth.onAuthStateChanged(async (user) => {
@@ -667,6 +818,7 @@
     renderOperations();
     renderCalls();
     renderVehicles();
+    renderMaintenance();
     renderTeam();
     if ($("driverCalls")) renderDriverPanel();
     renderFinance();
@@ -682,28 +834,38 @@
   }
 
   function renderSelects() {
-    const vehicleOptions = Object.values(state.vehicles).map((v) => `<option value="${esc(v.id)}">${esc(v.placa || v.id)} - ${esc(v.apelido || v.tipo || "")}</option>`).join("");
+    const vehicles = visibleRows(state.vehicles);
+    const calls = visibleRows(state.calls);
+    const vehicleOptions = vehicles.map((v) => `<option value="${esc(v.id)}">${esc(v.placa || v.id)} - ${esc(v.apelido || v.tipo || "")}</option>`).join("");
     setOptionsPreservingValue("callVehicle", `<option value="">Selecione</option>${vehicleOptions}`);
     setOptionsPreservingValue("expenseVehicle", `<option value="">Selecione</option>${vehicleOptions}`);
-    const drivers = Object.values(state.users).filter((u) => u.active !== false && DRIVER_ROLES.includes(normalizedRole(u.role)));
+    setOptionsPreservingValue("finVehicle", `<option value="">Sem veículo</option>${vehicleOptions}`);
+    setOptionsPreservingValue("maintenanceVehicle", `<option value="">Selecione</option>${vehicleOptions}`);
+    const drivers = visibleRows(state.users).filter((u) => u.active !== false && DRIVER_ROLES.includes(normalizedRole(u.role)));
+    const driverOptions = drivers.map((u) => `<option value="${esc(u.id)}">${esc(u.nome || u.email)}</option>`).join("");
     setOptionsPreservingValue("callDriver", `<option value="">Selecione</option>` + drivers.map((u) => `<option value="${esc(u.id)}">${esc(u.nome || u.email)}</option>`).join(""));
-    const myCalls = Object.values(state.calls).filter((c) => c.driverId === state.user?.uid && !["Finalizado", "Cancelado"].includes(c.status));
+    setOptionsPreservingValue("finDriver", `<option value="">Sem motorista</option>${driverOptions}`);
+    const callOptions = calls.map((c) => `<option value="${esc(c.id)}">${esc(c.protocolo || c.cliente || c.id)}</option>`).join("");
+    setOptionsPreservingValue("finCall", `<option value="">Sem chamado</option>${callOptions}`);
+    const myCalls = calls.filter((c) => c.driverId === state.user?.uid && !isFinalStatus(c));
     setOptionsPreservingValue("expenseCall", `<option value="">Sem chamado</option>` + myCalls.map((c) => `<option value="${esc(c.id)}">${esc(c.protocolo || c.cliente)}</option>`).join(""));
   }
 
   function renderDashboard() {
-    const calls = Object.values(state.calls);
+    const calls = visibleRows(state.calls);
     const active = calls.filter((c) => !isFinalStatus(c.status));
     const now = new Date();
-    const revenue = Object.values(state.transactions).filter((t) => t.type === "entrada").filter((t) => {
+    const transactions = visibleRows(state.transactions);
+    const expenses = visibleRows(state.expenses);
+    const revenue = transactions.filter((t) => t.type === "entrada").filter((t) => {
       const d = new Date(t.date || t.createdAt || 0);
       return d.getMonth() === now.getMonth() && d.getFullYear() === now.getFullYear();
     }).reduce((sum, t) => sum + Number(t.amount || 0), 0);
-    const pendingExpenses = Object.values(state.expenses).filter((e) => e.status === "pendente").reduce((sum, e) => sum + Number(e.amount || 0), 0);
-    const online = Object.values(state.vehicles).filter((v) => v.location && v.lastTrackerAt).length;
+    const pendingExpenses = expenses.filter((e) => e.status === "pendente").reduce((sum, e) => sum + Number(e.amount || 0), 0);
+    const online = visibleRows(state.vehicles).filter((v) => v.location && v.lastTrackerAt).length;
     $("kpiActiveCalls").textContent = active.length;
-    $("kpiRevenue").textContent = money(revenue);
-    $("kpiExpenses").textContent = money(pendingExpenses);
+    $("kpiRevenue").textContent = canSeeSensitiveFinance() ? money(revenue) : "Restrito";
+    $("kpiExpenses").textContent = canSeeSensitiveFinance() ? money(pendingExpenses) : "Restrito";
     $("kpiOnline").textContent = online;
     const events = calls.flatMap((c) => (c.timeline || []).map((t) => ({ ...t, call: c }))).sort((a, b) => String(b.at || "").localeCompare(String(a.at || ""))).slice(0, 10);
     $("timelineBox").innerHTML = events.length ? events.map((e) => `<div class="timeline-item"><b>${esc(e.call.protocolo || e.call.cliente || "Chamado")}</b><br><span>${esc(e.text || "")}</span><br><small>${dateTime(e.at)}</small></div>`).join("") : `<p class="muted">Sem eventos ainda.</p>`;
@@ -711,25 +873,42 @@
 
   function filteredOperationCalls() {
     const filter = state.operationFilter || "ativos";
-    return Object.values(state.calls).filter((c) => {
+    return visibleRows(state.calls).filter((c) => {
       if (filter === "todos") return true;
       if (filter === "ativos") return !isFinalStatus(c.status);
-      return operationalStatus(c.status) === filter;
+      return currentStatusKey(c) === filter || operationalStatus(c) === filter;
+    }).filter((c) => {
+      if (state.operationPriorityFilter && String(c.priority || "") !== state.operationPriorityFilter) return false;
+      if (state.operationInsuranceFilter && String(c.insurance || c.source || "") !== state.operationInsuranceFilter) return false;
+      if (state.operationDriverFilter && String(c.driverId || "") !== state.operationDriverFilter) return false;
+      if (state.operationVehicleFilter && String(c.vehicleId || "") !== state.operationVehicleFilter) return false;
+      return true;
     }).sort((a, b) => {
       const pa = priorityWeight(a) - priorityWeight(b);
       if (pa) return pa;
+      const sa = slaInfo(a).overdue ? -1 : 0;
+      const sb = slaInfo(b).overdue ? -1 : 0;
+      if (sa !== sb) return sa - sb;
       return String(b.createdAt || "").localeCompare(String(a.createdAt || ""));
     });
   }
 
   function renderOperations() {
     if (!$("opsKpis")) return;
-    const calls = Object.values(state.calls);
+    const calls = visibleRows(state.calls);
     const active = calls.filter((c) => !isFinalStatus(c.status));
-    const waiting = active.filter((c) => operationalStatus(c.status) === "Aguardando Despacho");
-    const inRoute = active.filter((c) => ["Despachado", "Em Rota", "No Local", "Em Transporte"].includes(operationalStatus(c.status)));
+    const waiting = active.filter((c) => currentStatusKey(c) === "aguardando_despacho");
+    const inRoute = active.filter((c) => ["despachado", "motorista_a_caminho", "motorista_no_local", "veiculo_carregado", "em_transporte"].includes(currentStatusKey(c)));
     const insurance = active.filter((c) => String(c.source || c.origemComercial || "").toLowerCase().includes("segur") || String(c.insurance || "").trim());
-    const onlineVehicles = Object.values(state.vehicles).filter((v) => v.location && v.lastTrackerAt);
+    const onlineVehicles = visibleRows(state.vehicles).filter((v) => v.location && v.lastTrackerAt);
+    const overdue = active.filter((c) => slaInfo(c).overdue);
+    const visibleValue = canSeeSensitiveFinance() ? money(active.reduce((s, c) => s + Number(c.valor || 0), 0)) : "Restrito";
+    const insuranceOptions = Array.from(new Set(active.map((c) => c.insurance || c.source || "").filter(Boolean))).sort();
+    const driverOptions = visibleRows(state.users).filter((u) => u.active !== false && DRIVER_ROLES.includes(normalizedRole(u.role)));
+    const vehicleOptions = visibleRows(state.vehicles).sort((a, b) => String(a.placa || a.id || "").localeCompare(String(b.placa || b.id || "")));
+    setOptionsPreservingValue("opsInsuranceFilter", `<option value="">Todas seguradoras</option>` + insuranceOptions.map((v) => `<option value="${esc(v)}">${esc(v)}</option>`).join(""));
+    setOptionsPreservingValue("opsDriverFilter", `<option value="">Todos motoristas</option>` + driverOptions.map((u) => `<option value="${esc(u.id)}">${esc(u.nome || u.email)}</option>`).join(""));
+    setOptionsPreservingValue("opsVehicleFilter", `<option value="">Todos veículos</option>` + vehicleOptions.map((v) => `<option value="${esc(v.id)}">${esc(v.placa || v.id)}</option>`).join(""));
     $("opsKpis").innerHTML = `
       <div class="card kpi col-3"><span>Fila ativa</span><strong>${active.length}</strong></div>
       <div class="card kpi col-3"><span>Aguardando despacho</span><strong>${waiting.length}</strong></div>
@@ -738,18 +917,21 @@
       <div class="card kpi col-3"><span>Frota online</span><strong>${onlineVehicles.length}</strong></div>
       <div class="card kpi col-3"><span>Sem rota precisa</span><strong>${active.filter((c) => !(c.routePrecision === "osrm_openstreetmap" || c.routeMetrics && c.routeMetrics.fullRoute && c.routeMetrics.fullRoute.isPrecise)).length}</strong></div>
       <div class="card kpi col-3"><span>Urgentes</span><strong>${active.filter((c) => String(c.priority).toLowerCase() === "urgente").length}</strong></div>
-      <div class="card kpi col-3"><span>Valor previsto ativo</span><strong>${money(active.reduce((s, c) => s + Number(c.valor || 0), 0))}</strong></div>`;
+      <div class="card kpi col-3"><span>SLA vencido</span><strong>${overdue.length}</strong></div>
+      <div class="card kpi col-3"><span>Valor previsto ativo</span><strong>${visibleValue}</strong></div>`;
 
     const filtered = filteredOperationCalls();
     if (!state.selectedCallId && filtered.length) state.selectedCallId = filtered[0].id;
-    if (state.selectedCallId && !state.calls[state.selectedCallId]) state.selectedCallId = filtered[0] && filtered[0].id || null;
+    if (state.selectedCallId && (!state.calls[state.selectedCallId] || state.calls[state.selectedCallId].deletedAt)) state.selectedCallId = filtered[0] && filtered[0].id || null;
     const selectedCall = state.calls[state.selectedCallId] || null;
     $("opsCallsList").innerHTML = filtered.length ? filtered.map((c) => {
       const selected = c.id === state.selectedCallId ? " selected" : "";
       const vehicle = state.vehicles[c.vehicleId] || {};
       const driver = state.users[c.driverId] || {};
-      const st = operationalStatus(c.status);
+      const st = operationalStatus(c);
+      const sla = slaInfo(c);
       const routeOk = c.routePrecision === "osrm_openstreetmap" || c.routeMetrics && c.routeMetrics.fullRoute && c.routeMetrics.fullRoute.isPrecise;
+      const wa = phoneWhatsappUrl(c.phone, `JM Guinchos - chamado ${c.protocolo || c.id}`);
       return `<div class="ops-card${selected}" onclick="JM.app.selectOperationalCall('${esc(c.id)}')">
         <div class="actions" style="justify-content:space-between"><b>${esc(c.protocolo || c.cliente || c.id)}</b><span class="badge ${statusClass(st)}">${esc(st)}</span></div>
         <div class="small"><b>${esc(c.cliente || "Cliente")}</b> ${c.phone ? `· ${esc(c.phone)}` : ""}</div>
@@ -757,16 +939,17 @@
         <div class="small">${esc(c.originLabel || c.origem && c.origem.label || "Origem não informada")} → ${esc(c.destLabel || c.destino && c.destino.label || "Destino aberto")}</div>
         <div class="muted small">Frota: ${esc(vehicle.placa || "sem veículo")} · Motorista: ${esc(driver.nome || driver.email || "sem motorista")}</div>
         <div class="actions ops-mini-actions">
-          <button class="btn" type="button" onclick="event.stopPropagation();JM.app.setCallStatus('${esc(c.id)}','Em Rota')">Em rota</button>
-          <button class="btn" type="button" onclick="event.stopPropagation();JM.app.setCallStatus('${esc(c.id)}','No Local')">No local</button>
-          <button class="btn" type="button" onclick="event.stopPropagation();JM.app.setCallStatus('${esc(c.id)}','Em Transporte')">Transporte</button>
-          <button class="btn good" type="button" onclick="event.stopPropagation();JM.app.setCallStatus('${esc(c.id)}','Finalizado')">Finalizar</button>
+          <button class="btn" type="button" onclick="event.stopPropagation();JM.app.setCallStatus('${esc(c.id)}','motorista_a_caminho')">A caminho</button>
+          <button class="btn" type="button" onclick="event.stopPropagation();JM.app.setCallStatus('${esc(c.id)}','motorista_no_local')">No local</button>
+          <button class="btn" type="button" onclick="event.stopPropagation();JM.app.setCallStatus('${esc(c.id)}','em_transporte')">Transporte</button>
+          <button class="btn good" type="button" onclick="event.stopPropagation();JM.app.setCallStatus('${esc(c.id)}','finalizado')">Finalizar</button>
+          ${wa ? `<a class="btn" href="${esc(wa)}" target="_blank" onclick="event.stopPropagation()">WhatsApp</a>` : ""}
         </div>
-        <div>${routeOk ? '<span class="badge ok">Rota por ruas</span>' : '<span class="badge warn">Rota estimada</span>'} ${String(c.priority).toLowerCase() === 'urgente' ? '<span class="badge danger">Urgente</span>' : ''}</div>
+        <div>${routeOk ? '<span class="badge ok">Rota por ruas</span>' : '<span class="badge warn">Rota estimada</span>'} <span class="badge ${sla.className}">${esc(sla.label)}</span> ${String(c.priority).toLowerCase() === 'urgente' ? '<span class="badge danger">Urgente</span>' : ''}</div>
       </div>`;
     }).join("") : `<p class="muted">Nenhum chamado no filtro selecionado.</p>`;
 
-    const vehicles = Object.values(state.vehicles).sort((a, b) => String(a.placa || a.id || "").localeCompare(String(b.placa || b.id || "")));
+    const vehicles = visibleRows(state.vehicles).sort((a, b) => String(a.placa || a.id || "").localeCompare(String(b.placa || b.id || "")));
     if (!state.selectedVehicleId && selectedCall && selectedCall.vehicleId) state.selectedVehicleId = selectedCall.vehicleId;
     $("opsVehiclesList").innerHTML = vehicles.length ? vehicles.map((v) => {
       const selected = v.id === state.selectedVehicleId ? " selected" : "";
@@ -803,7 +986,7 @@
   }
 
   async function assignSelectedVehicleToSelectedCall() {
-    if (!isOffice()) return toast("Somente equipe autorizada pode despachar.", "danger");
+    if (!canOperateCalls()) return toast("Somente equipe operacional autorizada pode despachar.", "danger");
     const callId = state.selectedCallId;
     const vehicleId = state.selectedVehicleId;
     if (!callId || !vehicleId) return toast("Selecione um chamado e um veículo.", "danger");
@@ -811,6 +994,7 @@
     await db.collection("calls").doc(callId).update({
       vehicleId,
       status: "Despachado",
+      statusKey: "despachado",
       dispatchedAt: new Date().toISOString(),
       dispatchedBy: state.user.uid,
       timeline: arrayUnion({ at: new Date().toISOString(), by: state.profile.nome || state.user.email, text: "Veículo " + (vehicle && (vehicle.placa || vehicle.id) || vehicleId) + " despachado pela Central Operacional" })
@@ -845,7 +1029,7 @@ Rota: ${url}`;
   }
 
   function renderCalls() {
-    const rows = Object.values(state.calls).sort((a, b) => String(b.createdAt || "").localeCompare(String(a.createdAt || "")));
+    const rows = visibleRows(state.calls).sort((a, b) => String(b.createdAt || "").localeCompare(String(a.createdAt || "")));
     if (!rows.length) return $("callsTable").innerHTML = `<p class="muted">Nenhum chamado registrado.</p>`;
     $("callsTable").innerHTML = `<table><thead><tr><th>Protocolo</th><th>Cliente</th><th>Origem/Destino</th><th>Veículo</th><th>Status</th><th>Ações</th></tr></thead><tbody>` + rows.map((c) => {
       const vehicle = state.vehicles[c.vehicleId] || {};
@@ -854,30 +1038,41 @@ Rota: ${url}`;
       const km = routeKm(c, vehicle);
       const metric = c.routeDistanceText || c.routeMetrics && c.routeMetrics.fullRoute && c.routeMetrics.fullRoute.distanceText || c.routeMetrics && c.routeMetrics.bestToOrigin && c.routeMetrics.bestToOrigin.distanceText || (km ? km.toFixed(1).replace(".", ",") + " km" : "Sem rota");
       const routeBadge = c.routePrecision === "osrm_openstreetmap" || c.routeMetrics && c.routeMetrics.fullRoute && c.routeMetrics.fullRoute.isPrecise ? `<br><span class="badge ok">Rota por ruas OSM</span>` : `<br><span class="badge warn">Fallback/estimada</span>`;
-      const adminActions = isAdmin() ? `<button class="btn" onclick="JM.app.editCall('${esc(c.id)}')">Editar</button><button class="btn danger" onclick="JM.app.deleteCall('${esc(c.id)}')">Excluir</button>` : "";
+      const adminActions = canOwnCompany() ? `<button class="btn" onclick="JM.app.editCall('${esc(c.id)}')">Editar</button><button class="btn danger" onclick="JM.app.deleteCall('${esc(c.id)}')">Excluir</button>` : "";
+      const valueHtml = canSeeSensitiveFinance() ? `<br><b>${money(c.valor || 0)}</b>` : "";
+      const sla = slaInfo(c);
       return `<tr>
         <td><b>${esc(c.protocolo || c.id)}</b><br><span class="muted small">${dateTime(c.createdAt)}</span></td>
         <td>${esc(c.cliente || "")}<br><span class="muted small">${esc(c.phone || "")}</span><br><span class="muted small">${esc(c.source || "Particular")}${c.insurance ? " · " + esc(c.insurance) : ""}${c.insuranceProtocol ? " · Prot. " + esc(c.insuranceProtocol) : ""}</span></td>
         <td><span class="small">${esc(c.originLabel || c.origem && c.origem.label || "-")}</span><br><span class="muted small">→ ${esc(c.destLabel || c.destino && c.destino.label || "-")}</span><br><b>${esc(metric)}</b>${routeBadge}${url ? `<br><a class="info small" target="_blank" href="${esc(url)}">Abrir rota no Maps</a>` : ""}</td>
         <td>${esc(vehicle.placa || "-")}<br><span class="muted small">${esc(driver.nome || driver.email || "Sem motorista")}</span></td>
-        <td><span class="badge ${statusClass(c.status)}">${esc(c.status || "Novo")}</span><br><b>${money(c.valor || 0)}</b></td>
-        <td class="row-actions"><button class="btn good" onclick="JM.app.setCallStatus('${esc(c.id)}','Despachado')">Despachar</button><button class="btn primary" onclick="JM.app.setCallStatus('${esc(c.id)}','Em Atendimento')">Atender</button><button class="btn" onclick="JM.app.setCallStatus('${esc(c.id)}','Finalizado')">Finalizar</button>${adminActions}</td>
+        <td><span class="badge ${statusClass(c)}">${esc(operationalStatus(c))}</span>${valueHtml}<br><span class="badge ${sla.className}">${esc(sla.label)}</span></td>
+        <td class="row-actions"><button class="btn good" onclick="JM.app.setCallStatus('${esc(c.id)}','despachado')">Despachar</button><button class="btn primary" onclick="JM.app.setCallStatus('${esc(c.id)}','motorista_a_caminho')">A caminho</button><button class="btn" onclick="JM.app.setCallStatus('${esc(c.id)}','finalizado')">Finalizar</button>${adminActions}</td>
       </tr>`;
     }).join("") + `</tbody></table>`;
   }
 
   $("callForm").onsubmit = async (e) => {
     e.preventDefault();
-    if (!isOffice()) return toast("Somente equipe autorizada pode registrar chamado.", "danger");
+    const submitBtn = e.submitter || document.querySelector("#callForm button[type='submit']");
+    if (!canOperateCalls()) return toast("Somente equipe operacional autorizada pode registrar chamado.", "danger");
     const originAddress = addressFromInputs("origin");
     const destinationAddress = addressFromInputs("destination");
     if (!originAddress || !originAddress.coords) {
       return toast("Antes de registrar, informe a origem por link de mapa ou latitude/longitude real.", "danger");
     }
+    const customerPlate = $("callCustomerPlate") ? plateKey($("callCustomerPlate").value) : "";
+    if (customerPlate && !isValidPlate(customerPlate)) {
+      return toast("Placa do cliente inválida. Use ABC1234 ou ABC1D23.", "danger");
+    }
+    if (($("callSource") && /segur|assist/i.test($("callSource").value)) && $("callInsuranceProtocol") && !$("callInsuranceProtocol").value.trim()) {
+      return toast("Chamado de seguradora/assistência precisa de protocolo para não perder o rastreio do acionamento.", "danger");
+    }
     const best = bestSmartRoute();
     const routePoints = routePointsFromForm(true);
     const externalRouteUrl = currentExternalRouteUrl();
     const now = new Date().toISOString();
+    setButtonBusy(submitBtn, true, "Salvando...");
     const baseData = {
       cliente: $("callClient").value.trim(),
       phone: $("callPhone").value.trim(),
@@ -888,7 +1083,11 @@ Rota: ${url}`;
       insurance: $("callInsurance") ? $("callInsurance").value.trim() : "",
       insuranceProtocol: $("callInsuranceProtocol") ? $("callInsuranceProtocol").value.trim() : "",
       policy: $("callPolicy") ? $("callPolicy").value.trim() : "",
-      customerPlate: $("callCustomerPlate") ? plateKey($("callCustomerPlate").value) : "",
+      claimNumber: $("callClaim") ? $("callClaim").value.trim() : "",
+      policyNumber: $("callPolicyNumber") ? $("callPolicyNumber").value.trim() : "",
+      billingStatus: $("callBillingStatus") ? $("callBillingStatus").value : "aberto",
+      slaLimitAt: $("callSlaLimit") ? $("callSlaLimit").value : "",
+      customerPlate,
       customerVehicle: $("callCustomerVehicle") ? $("callCustomerVehicle").value.trim() : "",
       extraKm: $("callExtraKm") ? parseMoney($("callExtraKm").value) : 0,
       vehicleId: $("callVehicle").value,
@@ -918,40 +1117,52 @@ Rota: ${url}`;
       } : null,
       notes: $("callNotes").value.trim()
     };
-    if (state.editingCallId) {
-      const current = state.calls[state.editingCallId] || {};
-      await db.collection("calls").doc(state.editingCallId).set(Object.assign({}, baseData, {
-        status: current.status || ($("callDriver").value ? "Despachado" : "Novo"),
-        updatedAt: now,
-        updatedBy: state.user.uid,
-        timeline: arrayUnion({ at: now, by: state.profile.nome || state.user.email, text: "Chamado editado pelo gestor" })
-      }), { merge: true });
+    try {
+      if (state.editingCallId) {
+        if (!canOwnCompany() && !hasRole(["gerente"])) return toast("Somente gestor/dono ou gerente pode editar chamados.", "danger");
+        const current = state.calls[state.editingCallId] || {};
+        const nextKey = currentStatusKey(current) || ($("callDriver").value ? "despachado" : "aguardando_despacho");
+        await db.collection("calls").doc(state.editingCallId).set(Object.assign({}, baseData, {
+          status: statusLabel(nextKey),
+          statusKey: nextKey,
+          updatedAt: now,
+          updatedBy: state.user.uid,
+          timeline: arrayUnion({ at: now, by: personName(), text: "Chamado editado pela central" })
+        }), { merge: true });
+        resetCallForm();
+        toast("Chamado atualizado.", "ok");
+        return;
+      }
+      const protocolo = "JM-" + now.replace(/\D/g, "").slice(2, 14);
+      const initialKey = $("callDriver").value ? "despachado" : "aguardando_despacho";
+      await db.collection("calls").add(Object.assign({}, baseData, {
+        protocolo,
+        status: statusLabel(initialKey),
+        statusKey: initialKey,
+        createdAt: now,
+        createdBy: state.user.uid,
+        timeline: [{ at: now, by: personName(), text: "Chamado criado com endereço validado e rota inteligente" }]
+      }));
       resetCallForm();
-      toast("Chamado atualizado.", "ok");
-      return;
+      toast("Chamado registrado com dados de rota.", "ok");
+    } finally {
+      setButtonBusy(submitBtn, false);
     }
-    const protocolo = "JM-" + now.replace(/\D/g, "").slice(2, 14);
-    await db.collection("calls").add(Object.assign({}, baseData, {
-      protocolo,
-      status: $("callDriver").value ? "Despachado" : "Aguardando Despacho",
-      createdAt: now,
-      createdBy: state.user.uid,
-      timeline: [{ at: now, by: state.profile.nome || state.user.email, text: "Chamado criado com endereço validado e rota inteligente" }]
-    }));
-    resetCallForm();
-    toast("Chamado registrado com dados de rota.", "ok");
   };
 
   async function setCallStatus(id, status) {
-    if (!isOffice()) return toast("Somente equipe autorizada pode alterar status.", "danger");
+    if (!canOperateCalls()) return toast("Somente equipe operacional autorizada pode alterar status.", "danger");
     const call = state.calls[id];
     if (!call) return;
+    const key = statusKey(status);
+    const label = statusLabel(key);
     const updates = {
-      status,
+      status: label,
+      statusKey: key,
       updatedAt: new Date().toISOString(),
-      timeline: arrayUnion({ at: new Date().toISOString(), by: state.profile.nome || state.user.email, text: "Status alterado para " + status })
+      timeline: arrayUnion({ at: new Date().toISOString(), by: personName(), text: "Status alterado para " + label })
     };
-    if (status === "Finalizado" && Number(call.valor || 0) > 0 && !call.financeCreated && isAdmin()) {
+    if (key === "finalizado" && Number(call.valor || 0) > 0 && !call.financeCreated && canManageFinance()) {
       updates.financeCreated = true;
       await db.collection("transactions").add({
         type: "entrada",
@@ -970,7 +1181,7 @@ Rota: ${url}`;
   }
 
   function editCall(id) {
-    if (!isAdmin()) return toast("Somente gestor/dono pode editar chamados.", "danger");
+    if (!canOwnCompany() && !hasRole(["gerente"])) return toast("Somente gestor/dono ou gerente pode editar chamados.", "danger");
     const call = state.calls[id];
     if (!call) return toast("Chamado não encontrado.", "danger");
     state.editingCallId = id;
@@ -984,6 +1195,10 @@ Rota: ${url}`;
     setValue("callInsurance", call.insurance || "");
     setValue("callInsuranceProtocol", call.insuranceProtocol || "");
     setValue("callPolicy", call.policy || "");
+    setValue("callClaim", call.claimNumber || "");
+    setValue("callPolicyNumber", call.policyNumber || "");
+    setValue("callSlaLimit", call.slaLimitAt || "");
+    setValue("callBillingStatus", call.billingStatus || "aberto");
     setValue("callCustomerPlate", call.customerPlate || "");
     setValue("callCustomerVehicle", call.customerVehicle || "");
     setValue("callExtraKm", call.extraKm || "");
@@ -1021,36 +1236,61 @@ Rota: ${url}`;
   }
 
   async function deleteCall(id) {
-    if (!isAdmin()) return toast("Somente gestor/dono pode excluir chamados.", "danger");
+    if (!canOwnCompany()) return toast("Somente gestor/dono pode excluir chamados.", "danger");
     const call = state.calls[id];
     if (!call) return toast("Chamado não encontrado.", "danger");
     const label = call.protocolo || call.cliente || id;
-    if (!window.confirm(`Excluir o chamado ${label}? Esta ação remove o chamado e lançamentos financeiros vinculados a ele.`)) return;
-    const batch = db.batch();
-    batch.delete(db.collection("calls").doc(id));
+    const reason = window.prompt(`Motivo para excluir o chamado ${label}:`, "Cancelamento operacional");
+    if (reason === null) return;
+    await softDeleteDoc("calls", id, call, reason);
     const linkedTransactions = await db.collection("transactions").where("callId", "==", id).get();
-    linkedTransactions.forEach((doc) => batch.delete(doc.ref));
+    const batch = db.batch();
+    linkedTransactions.forEach((doc) => {
+      batch.set(doc.ref, {
+        deletedAt: new Date().toISOString(),
+        deletedBy: state.user.uid,
+        deletedByEmail: state.user.email,
+        auditReason: "Vinculado ao chamado excluído: " + reason
+      }, { merge: true });
+    });
     await batch.commit();
     if (state.editingCallId === id) resetCallForm();
-    toast("Chamado excluído.", "ok");
+    toast("Chamado removido do painel com auditoria.", "ok");
   }
 
   function renderVehicles() {
-    const rows = Object.values(state.vehicles).sort((a, b) => String(a.placa || "").localeCompare(String(b.placa || "")));
-    $("fleetTable").innerHTML = rows.length ? `<table><thead><tr><th>Placa</th><th>Tipo</th><th>Status</th><th>Tracker</th></tr></thead><tbody>` + rows.map((v) => `<tr><td><b>${esc(v.placa || v.id)}</b><br><span class="muted small">${esc(v.apelido || "")}</span></td><td>${esc(v.tipo || "")}</td><td><span class="badge info">${esc(v.status || "")}</span></td><td>${v.location ? `${esc(v.location.lat)}, ${esc(v.location.lng)}` : "Sem posição"}</td></tr>`).join("") + `</tbody></table>` : `<p class="muted">Nenhum veículo.</p>`;
+    const rows = visibleRows(state.vehicles).sort((a, b) => String(a.placa || "").localeCompare(String(b.placa || "")));
+    const txs = visibleRows(state.transactions);
+    const maint = visibleRows(state.maintenance);
+    $("fleetTable").innerHTML = rows.length ? `<table><thead><tr><th>Placa</th><th>Tipo</th><th>Status</th><th>Tracker</th><th>Resultado</th></tr></thead><tbody>` + rows.map((v) => {
+      const age = minutesSince(v.lastTrackerAt || v.updatedAt);
+      const gpsBadge = v.location && age != null && age <= 10 ? "ok" : v.location ? "warn" : "muted";
+      const vehicleTx = txs.filter((t) => t.vehicleId === v.id);
+      const entrada = vehicleTx.filter((t) => t.type === "entrada").reduce((s, t) => s + Number(t.amount || 0), 0);
+      const saida = vehicleTx.filter((t) => t.type === "saida").reduce((s, t) => s + Number(t.amount || 0), 0);
+      const manutencao = maint.filter((m) => m.vehicleId === v.id).reduce((s, m) => s + Number(m.cost || 0), 0);
+      const lucro = entrada - saida - manutencao;
+      return `<tr><td><b>${esc(v.placa || v.id)}</b><br><span class="muted small">${esc(v.apelido || "")}</span></td><td>${esc(v.tipo || "")}</td><td><span class="badge info">${esc(v.status || "")}</span></td><td><span class="badge ${gpsBadge}">${age == null ? "sem GPS" : "há " + age + " min"}</span><br><span class="muted small">${esc(v.trackerId || v.trackerDeviceId || "")}</span></td><td>${canSeeSensitiveFinance() ? `<b>${money(lucro)}</b><br><span class="muted small">Receita ${money(entrada)} · Custo ${money(saida + manutencao)}</span>` : "Restrito"}</td></tr>`;
+    }).join("") + `</tbody></table>` : `<p class="muted">Nenhum veículo.</p>`;
 
-    $("vehicleCards").innerHTML = rows.length ? rows.map((v) => `<div class="card col-3"><b>${esc(v.placa || v.id)}</b><p class="muted small">${esc(v.apelido || v.tipo || "")}</p><span class="badge info">${esc(v.status || "")}</span><p class="small">${v.location ? `Lat ${esc(v.location.lat)}<br>Lng ${esc(v.location.lng)}` : "Sem posição do tracker"}</p></div>`).join("") : `<p class="muted">Sem frota cadastrada.</p>`;
+    $("vehicleCards").innerHTML = rows.length ? rows.map((v) => {
+      const age = minutesSince(v.lastTrackerAt || v.updatedAt);
+      return `<div class="card col-3"><b>${esc(v.placa || v.id)}</b><p class="muted small">${esc(v.apelido || v.tipo || "")}</p><span class="badge info">${esc(v.status || "")}</span><p class="small">${v.location ? `Lat ${esc(v.location.lat)}<br>Lng ${esc(v.location.lng)}<br>Última posição há ${age == null ? "?" : age} min` : "Sem posição do tracker"}</p></div>`;
+    }).join("") : `<p class="muted">Sem frota cadastrada.</p>`;
   }
 
   $("vehicleForm").onsubmit = async (e) => {
     e.preventDefault();
-    if (!isAdmin()) return toast("Somente gestor/gerente pode editar frota.", "danger");
+    if (!canManageFleet()) return toast("Somente gestor/dono ou gerente pode editar frota.", "danger");
     const placa = plateKey($("vehiclePlate").value);
     if (!placa) return toast("Informe a placa.", "danger");
+    if (!isValidPlate(placa)) return toast("Placa inválida. Use ABC1234 ou ABC1D23.", "danger");
     await db.collection("vehicles").doc(placa).set({
       placa,
       apelido: $("vehicleAlias").value.trim(),
       tipo: $("vehicleType").value.trim(),
+      trackerId: $("vehicleTrackerId") ? $("vehicleTrackerId").value.trim() : placa,
+      trackerDeviceId: $("vehicleTrackerId") ? $("vehicleTrackerId").value.trim() : "",
       status: $("vehicleStatus").value,
       updatedAt: new Date().toISOString(),
       updatedBy: state.user.uid
@@ -1059,8 +1299,67 @@ Rota: ${url}`;
     toast("Veículo salvo.", "ok");
   };
 
+  function renderMaintenance() {
+    if (!$("maintenanceTable")) return;
+    const rows = visibleRows(state.maintenance).sort((a, b) => String(b.date || b.createdAt || "").localeCompare(String(a.date || a.createdAt || "")));
+    $("maintenanceTable").innerHTML = rows.length ? `<table><thead><tr><th>Data</th><th>Veículo</th><th>Serviço</th><th>Status</th><th>Custo</th><th>Ações</th></tr></thead><tbody>` + rows.map((m) => {
+      const vehicle = state.vehicles[m.vehicleId] || {};
+      return `<tr><td>${esc(m.date || dateTime(m.createdAt))}</td><td>${esc(vehicle.placa || m.vehicleId || "-")}</td><td>${esc(m.description || "")}<br><span class="muted small">${esc(m.odometerKm ? m.odometerKm + " km" : "")}</span></td><td><span class="badge info">${esc(m.status || "aberta")}</span></td><td>${canSeeSensitiveFinance() ? money(m.cost || 0) : "Restrito"}</td><td class="row-actions"><button class="btn" onclick="JM.app.editMaintenance('${esc(m.id)}')">Editar</button><button class="btn danger" onclick="JM.app.deleteMaintenance('${esc(m.id)}')">Excluir</button></td></tr>`;
+    }).join("") + `</tbody></table>` : `<p class="muted">Nenhuma manutenção registrada.</p>`;
+  }
+
+  $("maintenanceForm") && ($("maintenanceForm").onsubmit = async (e) => {
+    e.preventDefault();
+    if (!canManageFleet()) return toast("Somente gestor/dono ou gerente pode lançar manutenção.", "danger");
+    const now = new Date().toISOString();
+    const payload = {
+      vehicleId: $("maintenanceVehicle").value,
+      date: $("maintenanceDate").value || todayInput(),
+      description: $("maintenanceDesc").value.trim(),
+      odometerKm: $("maintenanceKm").value.trim(),
+      cost: parseMoney($("maintenanceCost").value),
+      status: $("maintenanceStatus").value,
+      updatedAt: now,
+      updatedBy: state.user.uid
+    };
+    if (!payload.vehicleId || !payload.description) return toast("Informe veículo e serviço da manutenção.", "danger");
+    if (state.editingMaintenanceId) {
+      await db.collection("maintenance").doc(state.editingMaintenanceId).set(payload, { merge: true });
+      toast("Manutenção atualizada.", "ok");
+    } else {
+      await db.collection("maintenance").add(Object.assign({ createdAt: now, createdBy: state.user.uid }, payload));
+      toast("Manutenção registrada.", "ok");
+    }
+    resetMaintenanceForm();
+  });
+
+  function editMaintenance(id) {
+    if (!canManageFleet()) return toast("Sem permissão para editar manutenção.", "danger");
+    const item = state.maintenance[id];
+    if (!item) return toast("Manutenção não encontrada.", "danger");
+    state.editingMaintenanceId = id;
+    setValue("maintenanceVehicle", item.vehicleId || "");
+    setValue("maintenanceDate", item.date || "");
+    setValue("maintenanceDesc", item.description || "");
+    setValue("maintenanceKm", item.odometerKm || "");
+    setValue("maintenanceCost", item.cost || "");
+    setValue("maintenanceStatus", item.status || "aberta");
+    setSubmitText("maintenanceForm", "Salvar alterações da manutenção");
+    if ($("maintenanceCancelEdit")) $("maintenanceCancelEdit").classList.remove("hidden");
+  }
+
+  async function deleteMaintenance(id) {
+    if (!canManageFleet()) return toast("Sem permissão para excluir manutenção.", "danger");
+    const item = state.maintenance[id];
+    if (!item) return toast("Manutenção não encontrada.", "danger");
+    const reason = window.prompt("Motivo para excluir a manutenção:", "Correção de lançamento");
+    if (reason === null) return;
+    await softDeleteDoc("maintenance", id, item, reason);
+    toast("Manutenção removida do painel com auditoria.", "ok");
+  }
+
   function renderTeam() {
-    const rows = Object.values(state.users).sort((a, b) => String(a.nome || a.email || "").localeCompare(String(b.nome || b.email || "")));
+    const rows = visibleRows(state.users).sort((a, b) => String(a.nome || a.email || "").localeCompare(String(b.nome || b.email || "")));
     $("teamTable").innerHTML = rows.length ? `<table><thead><tr><th>Nome</th><th>E-mail</th><th>Perfil</th><th>Status</th><th>Ações</th></tr></thead><tbody>` +
       rows.map((u) => {
         const canDelete = u.id !== state.user?.uid;
@@ -1089,7 +1388,7 @@ Rota: ${url}`;
   }
 
   function editTeamMember(id) {
-    if (!isAdmin()) return toast("Somente gestor/dono pode editar funcionários.", "danger");
+    if (!canManageTeam()) return toast("Somente gestor/dono pode editar funcionários.", "danger");
     const user = state.users[id];
     if (!user) return toast("Funcionário não encontrado.", "danger");
     state.editingUserId = id;
@@ -1107,26 +1406,34 @@ Rota: ${url}`;
   }
 
   async function deleteTeamMember(id) {
-    if (!isAdmin()) return toast("Somente gestor/dono pode excluir funcionários.", "danger");
+    if (!canManageTeam()) return toast("Somente gestor/dono pode excluir funcionários.", "danger");
     if (id === state.user?.uid) return toast("Você não pode excluir o próprio usuário logado.", "danger");
     const user = state.users[id];
     if (!user) return toast("Funcionário não encontrado.", "danger");
     const email = String(user.email || "").toLowerCase().trim();
-    if (!window.confirm(`Excluir ${user.nome || email || "este funcionário"} do painel JM? O login no Firebase Auth deve ser removido pelo Console ou por uma Cloud Function.`)) return;
+    const reason = window.prompt(`Motivo para excluir ${user.nome || email || "este funcionário"} do painel JM:`, "Desligamento da equipe");
+    if (reason === null) return;
+    await writeAudit("delete", "users", id, user, reason);
     const batch = db.batch();
-    batch.delete(db.collection("users").doc(id));
+    batch.set(db.collection("users").doc(id), {
+      active: false,
+      deletedAt: new Date().toISOString(),
+      deletedBy: state.user.uid,
+      deletedByEmail: state.user.email,
+      auditReason: reason
+    }, { merge: true });
     if (email) {
       batch.delete(db.collection("managerAccess").doc(email));
       batch.delete(db.collection("driverAccess").doc(email));
     }
     await batch.commit();
     if (state.editingUserId === id) resetTeamForm();
-    toast("Funcionário removido do painel.", "ok");
+    toast("Funcionário removido do painel. Remova o Auth manualmente ou por Cloud Function quando disponível.", "ok");
   }
 
   $("teamForm").onsubmit = async (e) => {
     e.preventDefault();
-    if (!isAdmin()) return toast("Somente gestor/gerente pode editar equipe.", "danger");
+    if (!canManageTeam()) return toast("Somente gestor/dono pode editar equipe.", "danger");
     const email = $("teamEmail").value.trim().toLowerCase();
     const pass = $("teamPass").value;
     const selectedRole = normalizedRole($("teamRole").value || "driver");
@@ -1218,39 +1525,90 @@ Rota: ${url}`;
   });
 
   function renderFinance() {
-    const rows = Object.values(state.transactions).sort((a, b) => String(b.createdAt || b.date || "").localeCompare(String(a.createdAt || a.date || "")));
-    $("financeTable").innerHTML = `<table><thead><tr><th>Data</th><th>Tipo</th><th>Descrição</th><th>Status</th><th>Valor</th></tr></thead><tbody>` +
-      rows.map((t) => `<tr><td>${esc(t.date || dateTime(t.createdAt))}</td><td>${esc(t.type || "")}</td><td>${esc(t.description || "")}</td><td>${esc(t.status || "")}</td><td><b>${money(t.amount || 0)}</b></td></tr>`).join("") +
+    if (!$("financeTable")) return;
+    if (!canManageFinance()) {
+      $("financeTable").innerHTML = `<p class="muted">Financeiro disponível somente para gestor/dono e perfil financeiro.</p>`;
+      if ($("expenseApproval")) $("expenseApproval").innerHTML = "";
+      return;
+    }
+    const rows = visibleRows(state.transactions).sort((a, b) => String(b.createdAt || b.date || "").localeCompare(String(a.createdAt || a.date || "")));
+    const entradas = rows.filter((t) => t.type === "entrada").reduce((s, t) => s + Number(t.amount || 0), 0);
+    const saidas = rows.filter((t) => t.type === "saida").reduce((s, t) => s + Number(t.amount || 0), 0);
+    $("financeTable").innerHTML = `<div class="finance-summary"><span>Receitas <b>${money(entradas)}</b></span><span>Despesas <b>${money(saidas)}</b></span><span>Lucro bruto <b>${money(entradas - saidas)}</b></span></div><table><thead><tr><th>Data</th><th>Tipo</th><th>Descrição</th><th>Vínculos</th><th>Status</th><th>Valor</th><th>Ações</th></tr></thead><tbody>` +
+      rows.map((t) => {
+        const call = state.calls[t.callId] || {};
+        const vehicle = state.vehicles[t.vehicleId] || {};
+        const driver = state.users[t.driverId] || {};
+        return `<tr><td>${esc(t.date || dateTime(t.createdAt))}</td><td>${esc(t.type || "")}</td><td>${esc(t.description || "")}<br><span class="muted small">${esc(t.category || "")}</span></td><td><span class="muted small">${esc(call.protocolo || t.callId || "Sem chamado")}<br>${esc(vehicle.placa || t.vehicleId || "Sem veículo")}<br>${esc(driver.nome || t.driverName || "")}</span></td><td>${esc(t.status || "")}</td><td><b>${money(t.amount || 0)}</b></td><td class="row-actions"><button class="btn" onclick="JM.app.editTransaction('${esc(t.id)}')">Editar</button><button class="btn danger" onclick="JM.app.deleteTransaction('${esc(t.id)}')">Excluir</button></td></tr>`;
+      }).join("") +
       `</tbody></table>${reportSignature()}`;
-    const pending = Object.values(state.expenses).filter((e) => e.status === "pendente");
-    $("expenseApproval").innerHTML = `<table><thead><tr><th>Motorista</th><th>Tipo</th><th>Valor</th><th>Obs</th><th>Ações</th></tr></thead><tbody>` +
+    const pending = visibleRows(state.expenses).filter((e) => e.status === "pendente");
+    $("expenseApproval").innerHTML = pending.length ? `<table><thead><tr><th>Motorista</th><th>Tipo</th><th>Valor</th><th>Obs</th><th>Ações</th></tr></thead><tbody>` +
       pending.map((e) => `<tr>
         <td>${esc(e.driverName || e.driverId)}</td><td>${esc(e.type || "")}</td><td><b>${money(e.amount || 0)}</b></td>
         <td>${esc(e.notes || "")}${e.photoUrl ? `<br><a class="info" href="${esc(e.photoUrl)}" target="_blank">Comprovante</a>` : ""}</td>
         <td><button class="btn good" onclick="JM.app.approveExpense('${esc(e.id)}')">Aprovar</button><button class="btn danger" onclick="JM.app.rejectExpense('${esc(e.id)}')">Reprovar</button></td>
-      </tr>`).join("") + `</tbody></table>`;
+      </tr>`).join("") + `</tbody></table>` : `<p class="muted">Sem despesas pendentes de aprovação.</p>`;
   }
 
   $("financeForm").onsubmit = async (e) => {
     e.preventDefault();
-    if (!isAdmin()) return toast("Somente gestor/financeiro pode lançar.", "danger");
-    await db.collection("transactions").add({
+    if (!canManageFinance()) return toast("Somente gestor/dono ou financeiro pode lançar.", "danger");
+    const payload = {
       type: $("finType").value,
       date: $("finDate").value,
       description: $("finDesc").value.trim(),
       amount: parseMoney($("finAmount").value),
       status: $("finStatus").value,
-      createdAt: new Date().toISOString(),
-      createdBy: state.user.uid
-    });
-    e.target.reset();
-    $("finDate").value = todayInput();
-    toast("Lançamento salvo.", "ok");
+      category: $("finCategory") ? $("finCategory").value.trim() : "",
+      callId: $("finCall") ? $("finCall").value : "",
+      vehicleId: $("finVehicle") ? $("finVehicle").value : "",
+      driverId: $("finDriver") ? $("finDriver").value : "",
+      updatedAt: new Date().toISOString(),
+      updatedBy: state.user.uid
+    };
+    if (state.editingTransactionId) {
+      await db.collection("transactions").doc(state.editingTransactionId).set(payload, { merge: true });
+      toast("Lançamento atualizado.", "ok");
+    } else {
+      await db.collection("transactions").add(Object.assign({ createdAt: new Date().toISOString(), createdBy: state.user.uid }, payload));
+      toast("Lançamento salvo.", "ok");
+    }
+    resetFinanceForm();
   };
+
+  function editTransaction(id) {
+    if (!canManageFinance()) return toast("Sem permissão para editar financeiro.", "danger");
+    const tx = state.transactions[id];
+    if (!tx) return toast("Lançamento não encontrado.", "danger");
+    state.editingTransactionId = id;
+    setValue("finType", tx.type || "entrada");
+    setValue("finDate", tx.date || todayInput());
+    setValue("finDesc", tx.description || "");
+    setValue("finAmount", tx.amount || "");
+    setValue("finStatus", tx.status || "Pendente");
+    setValue("finCategory", tx.category || "");
+    setValue("finCall", tx.callId || "");
+    setValue("finVehicle", tx.vehicleId || "");
+    setValue("finDriver", tx.driverId || "");
+    setSubmitText("financeForm", "Salvar alterações financeiras");
+    if ($("financeCancelEdit")) $("financeCancelEdit").classList.remove("hidden");
+  }
+
+  async function deleteTransaction(id) {
+    if (!canOwnCompany()) return toast("Somente gestor/dono pode excluir financeiro.", "danger");
+    const tx = state.transactions[id];
+    if (!tx) return toast("Lançamento não encontrado.", "danger");
+    const reason = window.prompt("Motivo para excluir o lançamento financeiro:", "Correção financeira");
+    if (reason === null) return;
+    await softDeleteDoc("transactions", id, tx, reason);
+    if (state.editingTransactionId === id) resetFinanceForm();
+    toast("Lançamento removido do painel com auditoria.", "ok");
+  }
 
   async function approveExpense(id) {
     const expense = state.expenses[id];
-    if (!expense || !isAdmin()) return;
+    if (!expense || !canManageFinance()) return;
     await db.collection("expenses").doc(id).update({ status: "aprovado", approvedAt: new Date().toISOString(), approvedBy: state.user.uid });
     await db.collection("transactions").add({
       type: "saida",
@@ -1261,6 +1619,7 @@ Rota: ${url}`;
       expenseId: id,
       callId: expense.callId || "",
       vehicleId: expense.vehicleId || "",
+      driverId: expense.driverId || "",
       createdAt: new Date().toISOString(),
       createdBy: state.user.uid
     });
@@ -1268,7 +1627,7 @@ Rota: ${url}`;
   }
 
   async function rejectExpense(id) {
-    if (!isAdmin()) return;
+    if (!canManageFinance()) return;
     await db.collection("expenses").doc(id).update({ status: "reprovado", rejectedAt: new Date().toISOString(), rejectedBy: state.user.uid });
     toast("Despesa reprovada.", "ok");
   }
@@ -1276,10 +1635,12 @@ Rota: ${url}`;
   function refreshMaps() {
     const active = document.querySelector(".view.active");
     window.JM_MAP_SETTINGS = activeMapSettings();
+    const vehicles = Object.fromEntries(visibleRows(state.vehicles).map((v) => [v.id, v]));
+    const calls = Object.fromEntries(visibleRows(state.calls).map((c) => [c.id, c]));
     if (!active) return;
-    if (active.id === "view-dashboard") window.JM.mapa.renderFleetMap("dashboardMap", state.vehicles, state.calls);
-    if (active.id === "view-operacao") window.JM.mapa.renderFleetMap("operationMap", state.vehicles, state.calls, { selectedCallId: state.selectedCallId, selectedVehicleId: state.selectedVehicleId, filter: state.operationFilter || "ativos" });
-    if (active.id === "view-mapa") window.JM.mapa.renderFleetMap("fleetMap", state.vehicles, state.calls);
+    if (active.id === "view-dashboard") window.JM.mapa.renderFleetMap("dashboardMap", vehicles, calls);
+    if (active.id === "view-operacao") window.JM.mapa.renderFleetMap("operationMap", vehicles, calls, { selectedCallId: state.selectedCallId, selectedVehicleId: state.selectedVehicleId, filter: state.operationFilter || "ativos" });
+    if (active.id === "view-mapa") window.JM.mapa.renderFleetMap("fleetMap", vehicles, calls);
   }
 
   function registerFreshServiceWorker() {
@@ -1297,14 +1658,18 @@ Rota: ${url}`;
     if ($("btnSyncTrackerNow")) $("btnSyncTrackerNow").onclick = () => syncTrackerNow(true);
     if ($("callCancelEdit")) $("callCancelEdit").onclick = resetCallForm;
     if ($("teamCancelEdit")) $("teamCancelEdit").onclick = resetTeamForm;
+    if ($("financeCancelEdit")) $("financeCancelEdit").onclick = resetFinanceForm;
+    if ($("maintenanceCancelEdit")) $("maintenanceCancelEdit").onclick = resetMaintenanceForm;
   }
 
   function boot() {
     bindNavigation();
     bindRouteButtons();
+    bindInputMasks();
     renderSmartRouteBox();
     initializeAddressTools();
-    $("finDate").value = todayInput();
+    if ($("finDate")) $("finDate").value = todayInput();
+    if ($("maintenanceDate")) $("maintenanceDate").value = todayInput();
     console.info("JM Guinchos login flow", LOGIN_FLOW_VERSION);
     registerFreshServiceWorker();
   }
@@ -1321,6 +1686,10 @@ Rota: ${url}`;
     deleteCall,
     editTeamMember,
     deleteTeamMember,
+    editTransaction,
+    deleteTransaction,
+    editMaintenance,
+    deleteMaintenance,
     approveExpense,
     rejectExpense,
     applySmartVehicle,

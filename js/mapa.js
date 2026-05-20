@@ -23,7 +23,7 @@
       js.id = "leaflet-js";
       js.src = "https://unpkg.com/leaflet@1.9.4/dist/leaflet.js";
       js.onload = () => resolve(window.L);
-      js.onerror = () => reject(new Error("Nao foi possivel carregar Leaflet."));
+    js.onerror = () => reject(new Error("Não foi possível carregar Leaflet."));
       document.head.appendChild(js);
     });
   }
@@ -106,17 +106,18 @@
   }
 
   function matchesFilter(call, options) {
+    if (call && call.deletedAt) return false;
     const filter = options && options.filter || "ativos";
     if (filter === "todos") return true;
-    if (filter === "ativos") return !isFinal(call && call.status);
-    return operationalStatus(call && call.status) === filter;
+    if (filter === "ativos") return !window.JM.utils.isFinalStatus(call);
+    return window.JM.utils.statusKey(call) === filter || operationalStatus(call && call.status) === filter;
   }
 
   async function renderFleetMap(containerId, vehicles, calls, options) {
     options = options || {};
     const container = document.getElementById(containerId);
     if (!container) return;
-    const located = Object.values(vehicles || {}).filter((v) => v.location && Number.isFinite(Number(v.location.lat)) && Number.isFinite(Number(v.location.lng)));
+    const located = Object.values(vehicles || {}).filter((v) => !v.deletedAt && v.location && Number.isFinite(Number(v.location.lat)) && Number.isFinite(Number(v.location.lng)));
     const routedCalls = Object.values(calls || {}).filter((c) => matchesFilter(c, options)).map((call) => {
       const forcedVehicle = options.selectedCallId && call.id === options.selectedCallId && options.selectedVehicleId ? vehicles && vehicles[options.selectedVehicleId] : null;
       const vehicle = forcedVehicle || vehicles && vehicles[call.vehicleId];
