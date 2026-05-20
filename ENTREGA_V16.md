@@ -61,7 +61,7 @@ Principais melhorias:
 ## Teste real recomendado
 
 1. Publique `firestore.rules` no Firebase Console.
-2. Limpe cache do navegador ou abra com `?v=jm-v16-refino-saas-guincho-seguradoras`.
+2. Limpe cache do navegador ou abra com `?v=jm-v17-fluxo-unico-financeiro-operacional`.
 3. Entre em `superadmin.html` com `tsvalencio@gmail.com`.
 4. Salve Tracker, Cloudinary se houver e crie/libere usuários.
 5. Entre em `jm.html` com gestor/dono.
@@ -104,4 +104,4 @@ node --check service-worker.js
 
 ## Cache/PWA
 
-O cache foi atualizado para `jm-guinchos-central-operacional-seguradoras-v16-briefing`. Após publicar no GitHub Pages, recarregue com Ctrl+F5 ou limpe dados do site se o navegador insistir em arquivos antigos.
+O cache foi atualizado para `jm-guinchos-fluxo-unico-financeiro-v17`. Após publicar no GitHub Pages, recarregue com Ctrl+F5 ou limpe dados do site se o navegador insistir em arquivos antigos.

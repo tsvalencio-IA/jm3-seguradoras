@@ -4,7 +4,7 @@
   const { $, esc, parseMoney, toast, statusClass, routeKm, mapsRouteUrl, statusKey, statusLabel, isFinalStatus } = window.JM.utils;
   const { auth, db, arrayUnion } = window.JM.firebase;
   const cfg = window.JM_CONFIG || {};
-  const DRIVER_FLOW_VERSION = "jm-v16-refino-saas-guincho-seguradoras";
+  const DRIVER_FLOW_VERSION = "jm-v17-fluxo-unico-financeiro-operacional";
   const state = { user: null, profile: null, calls: {}, vehicles: {}, expenses: {}, settings: {} };
   const unsubscribers = [];
 
@@ -28,6 +28,30 @@
 
   function visibleRows(rows) {
     return Object.values(rows || {}).filter((row) => row && !row.deletedAt);
+  }
+
+  function callDisplayName(call) {
+    if (!call) return "";
+    return call.insurance || call.billingParty || call.cliente || call.customerName || call.protocolo || "";
+  }
+
+  function callProtocolLabel(call, fallbackId) {
+    return call && (call.protocolo || call.insuranceProtocol || call.id) || fallbackId || "";
+  }
+
+  function syncDriverExpenseContext() {
+    const callId = $("driverExpenseCall") && $("driverExpenseCall").value;
+    const call = callId && state.calls[callId];
+    const vehicleSelect = $("driverExpenseVehicle");
+    const box = $("driverExpenseContext");
+    if (!vehicleSelect) return;
+    if (call && call.vehicleId) {
+      vehicleSelect.value = call.vehicleId;
+      const vehicle = state.vehicles[call.vehicleId] || {};
+      if (box) box.innerHTML = `Vinculado automaticamente ao chamado <b>${esc(callProtocolLabel(call, callId))}</b>, veículo <b>${esc(vehicle.placa || call.vehicleId)}</b> e pagador <b>${esc(callDisplayName(call) || "não informado")}</b>.`;
+    } else if (box) {
+      box.textContent = callId ? "Chamado sem veículo definido. Selecione o veículo manualmente." : "Escolha um chamado para puxar veículo, protocolo e seguradora automaticamente.";
+    }
   }
 
   function mergeNonEmpty(base, override) {
@@ -164,6 +188,7 @@
 
   $("driverLogoutBtn").onclick = () => auth.signOut();
   $("driverRefreshBtn").onclick = () => render();
+  if ($("driverExpenseCall")) $("driverExpenseCall").onchange = syncDriverExpenseContext;
 
   function activeCalls() {
     return visibleRows(state.calls).filter((c) => !isFinalStatus(c));
@@ -203,10 +228,15 @@
   }
 
   function renderExpenseSelects() {
+    const currentCall = $("driverExpenseCall") && $("driverExpenseCall").value || "";
+    const currentVehicle = $("driverExpenseVehicle") && $("driverExpenseVehicle").value || "";
     const callOptions = activeCalls().map((c) => `<option value="${esc(c.id)}">${esc(c.protocolo || c.cliente)}</option>`).join("");
     $("driverExpenseCall").innerHTML = `<option value="">Sem chamado</option>` + callOptions;
+    if (currentCall && state.calls[currentCall]) $("driverExpenseCall").value = currentCall;
     if ($("driverReportCall")) $("driverReportCall").innerHTML = `<option value="">Selecione</option>` + callOptions;
     $("driverExpenseVehicle").innerHTML = `<option value="">Selecione</option>` + visibleRows(state.vehicles).map((v) => `<option value="${esc(v.id)}">${esc(v.placa || v.id)}</option>`).join("");
+    if (currentVehicle && state.vehicles[currentVehicle]) $("driverExpenseVehicle").value = currentVehicle;
+    syncDriverExpenseContext();
   }
 
   async function setStatus(id, status) {
@@ -241,9 +271,13 @@
     const photo = $("driverExpensePhoto").files && $("driverExpensePhoto").files[0];
     let photoUrl = "";
     try { photoUrl = await uploadToCloudinary(photo); } catch (err) { toast("Foto não enviada: " + err.message, "danger"); }
+    const callId = $("driverExpenseCall").value;
+    const call = callId && state.calls[callId] || null;
+    const vehicleId = call && call.vehicleId || $("driverExpenseVehicle").value;
+    if (callId && !vehicleId) return toast("Este chamado ainda não tem veículo. Selecione o veículo antes de enviar a despesa.", "danger");
     await db.collection("expenses").add({
-      callId: $("driverExpenseCall").value,
-      vehicleId: $("driverExpenseVehicle").value,
+      callId,
+      vehicleId,
       type: $("driverExpenseType").value,
       amount: parseMoney($("driverExpenseAmount").value),
       notes: $("driverExpenseNotes").value.trim(),
@@ -251,11 +285,19 @@
       status: "pendente",
       driverId: state.user.uid,
       driverName: state.profile.nome || state.user.email,
+      customerId: call && call.customerId || "",
+      billingParty: callDisplayName(call),
+      protocol: callProtocolLabel(call, callId),
+      insurance: call && call.insurance || "",
+      insuranceProtocol: call && call.insuranceProtocol || "",
+      customerPlate: call && call.customerPlate || "",
+      sourceType: "driver_expense",
       createdAt: new Date().toISOString(),
       createdBy: state.user.uid
     });
     e.target.reset();
-    toast("Despesa enviada para aprovação.", "ok");
+    syncDriverExpenseContext();
+    toast("Despesa enviada para aprovação já vinculada ao chamado, veículo e pagador.", "ok");
   };
 
   $("driverReportForm") && ($("driverReportForm").onsubmit = async (e) => {

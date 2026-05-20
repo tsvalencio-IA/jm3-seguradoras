@@ -5,9 +5,9 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#07111f">
   <title>JM Guinchos - Motorista</title>
-  <link rel="manifest" href="manifest.json?v=jm-v16-refino-saas-guincho-seguradoras">
+  <link rel="manifest" href="manifest.json?v=jm-v17-fluxo-unico-financeiro-operacional">
   <link rel="icon" href="assets/icon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="css/style.css?v=jm-v16-refino-saas-guincho-seguradoras">
+  <link rel="stylesheet" href="css/style.css?v=jm-v17-fluxo-unico-financeiro-operacional">
 </head>
 <body>
   <section id="driverLoginView" class="login">
@@ -52,11 +52,12 @@
           <form id="driverExpenseForm" class="form-grid">
             <div class="wide"><label>Chamado</label><select id="driverExpenseCall"></select></div>
             <div><label>Veículo</label><select id="driverExpenseVehicle"></select></div>
+            <p id="driverExpenseContext" class="small muted wide">Escolha um chamado para puxar veículo, protocolo e seguradora automaticamente.</p>
             <div><label>Tipo</label><select id="driverExpenseType"><option>Combustível</option><option>Pedágio</option><option>Alimentação</option><option>Estacionamento</option><option>Manutenção</option><option>Outros</option></select></div>
             <div><label>Valor</label><input id="driverExpenseAmount" inputmode="decimal" required></div>
             <div class="wide"><label>Comprovante/foto</label><input id="driverExpensePhoto" type="file" accept="image/*" capture="environment"></div>
             <div class="wide"><label>Observação</label><textarea id="driverExpenseNotes"></textarea></div>
-            <button class="btn good wide" type="submit">Enviar relatório</button>
+            <button class="btn good wide" type="submit">Enviar despesa</button>
           </form>
         </section>
         <section class="panel col-5">
@@ -81,14 +82,14 @@
   <footer class="signature-footer">Powered by thIAguinho Soluções Digitais</footer>
   <div id="toast" class="toast"></div>
 
-  <script src="js/config.firebase.js?v=jm-v16-refino-saas-guincho-seguradoras"></script>
+  <script src="js/config.firebase.js?v=jm-v17-fluxo-unico-financeiro-operacional"></script>
   <script src="https://www.gstatic.com/firebasejs/10.12.5/firebase-app-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/10.12.5/firebase-auth-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/10.12.5/firebase-firestore-compat.js"></script>
-  <script src="js/utils.js?v=jm-v16-refino-saas-guincho-seguradoras"></script>
-  <script src="js/firebase.js?v=jm-v16-refino-saas-guincho-seguradoras"></script>
-  <script src="js/google-maps.js?v=jm-v16-refino-saas-guincho-seguradoras"></script>
-  <script src="js/mapa.js?v=jm-v16-refino-saas-guincho-seguradoras"></script>
-  <script src="js/motorista.js?v=jm-v16-refino-saas-guincho-seguradoras"></script>
+  <script src="js/utils.js?v=jm-v17-fluxo-unico-financeiro-operacional"></script>
+  <script src="js/firebase.js?v=jm-v17-fluxo-unico-financeiro-operacional"></script>
+  <script src="js/google-maps.js?v=jm-v17-fluxo-unico-financeiro-operacional"></script>
+  <script src="js/mapa.js?v=jm-v17-fluxo-unico-financeiro-operacional"></script>
+  <script src="js/motorista.js?v=jm-v17-fluxo-unico-financeiro-operacional"></script>
 </body>
 </html>

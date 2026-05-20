@@ -1,4 +1,4 @@
-const CACHE_NAME = "jm-guinchos-central-operacional-seguradoras-v16-briefing";
+const CACHE_NAME = "jm-guinchos-fluxo-unico-financeiro-v17";
 const ASSETS = [
   "./",
   "./index.html",

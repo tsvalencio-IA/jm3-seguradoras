@@ -10,7 +10,7 @@
   const { auth, secondaryAuth, db, ts, arrayUnion, emailIsAdmin } = window.JM.firebase;
   const cfg = window.JM_CONFIG || {};
   const SYSTEM_SIGNATURE = "Powered by thIAguinho Soluções Digitais";
-  const LOGIN_FLOW_VERSION = "jm-v16-refino-saas-guincho-seguradoras";
+  const LOGIN_FLOW_VERSION = "jm-v17-fluxo-unico-financeiro-operacional";
   let trackerTimer = null;
   let trackerBusy = false;
 
@@ -245,6 +245,266 @@
     }, { merge: true });
   }
 
+
+  function sourceDocId(prefix, id) {
+    return String(prefix || "doc") + "_" + String(id || "").replace(/[\\/\s]+/g, "_");
+  }
+
+  function statusLower(value) {
+    return String(value || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+  }
+
+  function statusMeansReceived(value) {
+    return /recebido|pago|baixado|liquidado/.test(statusLower(value));
+  }
+
+  function statusMeansOpen(value) {
+    return /receber|pagar|pendente|faturar|aberto/.test(statusLower(value));
+  }
+
+  async function getDocData(collectionName, id, localCache) {
+    if (!id) return null;
+    if (localCache && localCache[id]) return localCache[id];
+    try {
+      const snap = await db.collection(collectionName).doc(id).get();
+      return snap.exists ? { id: snap.id, ...snap.data() } : null;
+    } catch (err) {
+      console.warn("Falha ao buscar", collectionName, id, err);
+      return null;
+    }
+  }
+
+  function callDisplayName(call) {
+    if (!call) return "";
+    return call.insurance || call.billingParty || call.cliente || call.customerName || call.protocolo || "";
+  }
+
+  function callProtocolLabel(call, fallbackId) {
+    return call && (call.protocolo || call.insuranceProtocol || call.id) || fallbackId || "";
+  }
+
+  function enrichFinancialPayloadFromCall(payload, call) {
+    const out = Object.assign({}, payload || {});
+    if (!call) return out;
+    out.callId = out.callId || call.id || "";
+    out.vehicleId = out.vehicleId || call.vehicleId || "";
+    out.driverId = out.driverId || call.driverId || "";
+    out.customerId = out.customerId || call.customerId || "";
+    out.billingParty = out.billingParty || callDisplayName(call);
+    out.customerName = out.customerName || call.cliente || call.customerName || "";
+    out.insurance = out.insurance || call.insurance || "";
+    out.insuranceProtocol = out.insuranceProtocol || call.insuranceProtocol || "";
+    out.protocol = out.protocol || callProtocolLabel(call, call.id);
+    out.customerPlate = out.customerPlate || call.customerPlate || "";
+    out.serviceType = out.serviceType || call.serviceType || "";
+    return out;
+  }
+
+  async function recalculateCallFinancials(callId) {
+    if (!callId || !canManageFinance()) return;
+    const call = await getDocData("calls", callId, state.calls);
+    if (!call) return;
+    const snap = await db.collection("transactions").where("callId", "==", callId).get();
+    const rows = [];
+    snap.forEach((doc) => {
+      const data = { id: doc.id, ...doc.data() };
+      if (!data.deletedAt) rows.push(data);
+    });
+    const entradas = rows.filter((t) => t.type === "entrada");
+    const saidas = rows.filter((t) => t.type === "saida");
+    const expectedFromReceivable = entradas
+      .filter((t) => t.module === "call_receivable" || t.sourceType === "call_receivable" || t.sourceType === "call")
+      .reduce((sum, t) => sum + Number(t.amount || 0), 0);
+    const expectedAmount = Math.max(Number(call.valor || 0), expectedFromReceivable);
+    const paidAmount = entradas.reduce((sum, t) => {
+      if (statusMeansReceived(t.status)) return sum + Number(t.paidAmount || t.receivedAmount || t.amount || 0);
+      return sum + Number(t.paidAmount || t.receivedAmount || 0);
+    }, 0);
+    const costAmount = saidas.reduce((sum, t) => sum + Number(t.amount || 0), 0);
+    const balanceAmount = Math.max(0, expectedAmount - paidAmount);
+    let billingStatus = call.billingStatus || "aberto";
+    if (expectedAmount > 0) {
+      billingStatus = paidAmount <= 0 ? "a_receber" : balanceAmount > 0.009 ? "parcial" : "recebido";
+    } else if (isFinalStatus(call.statusKey || call.status)) {
+      billingStatus = "sem_valor";
+    }
+    await db.collection("calls").doc(callId).set({
+      financialSummary: {
+        expectedAmount,
+        paidAmount,
+        costAmount,
+        balanceAmount,
+        profitAmount: expectedAmount - costAmount,
+        marginPercent: expectedAmount > 0 ? Math.round(((expectedAmount - costAmount) / expectedAmount) * 10000) / 100 : 0,
+        transactionsCount: rows.length,
+        recalculatedAt: new Date().toISOString()
+      },
+      billingStatus,
+      paidAmount,
+      balanceAmount,
+      costAmount,
+      updatedFinancialAt: new Date().toISOString()
+    }, { merge: true });
+  }
+
+  async function upsertCallReceivable(callId, options) {
+    if (!callId || !canManageFinance()) return null;
+    const call = await getDocData("calls", callId, state.calls);
+    if (!call) {
+      toast("Chamado vinculado ao recebimento não foi encontrado.", "danger");
+      return null;
+    }
+    const now = new Date().toISOString();
+    const txId = sourceDocId("call_receivable", callId);
+    const expectedAmount = Math.max(Number(call.valor || 0), Number(options && options.expectedAmount || options && options.amount || 0));
+    const paidAmount = statusMeansReceived(options && options.status) ? Number(options && options.paidAmount != null ? options.paidAmount : options && options.amount || expectedAmount) : Number(options && options.paidAmount || 0);
+    const balanceAmount = Math.max(0, expectedAmount - paidAmount);
+    const status = options && options.status || (paidAmount <= 0 ? "A receber" : balanceAmount > 0.009 ? "Parcial" : "Recebido");
+    const base = enrichFinancialPayloadFromCall({
+      module: "call_receivable",
+      sourceType: "call_receivable",
+      sourceId: callId,
+      type: "entrada",
+      date: options && options.date || todayInput(),
+      dueDate: options && options.dueDate || options && options.date || todayInput(),
+      description: options && options.description || `Chamado ${callProtocolLabel(call, callId)} - ${callDisplayName(call)}`,
+      category: options && options.category || "Receita de chamado",
+      amount: expectedAmount,
+      paidAmount,
+      balanceAmount,
+      status,
+      paymentMethod: options && options.paymentMethod || "",
+      invoiceNumber: options && options.invoiceNumber || "",
+      updatedAt: now,
+      updatedBy: state.user.uid
+    }, call);
+    const ref = db.collection("transactions").doc(txId);
+    const old = await ref.get();
+    await ref.set(Object.assign(old.exists ? {} : { createdAt: now, createdBy: state.user.uid }, base), { merge: true });
+    await db.collection("calls").doc(callId).set({
+      financeCreated: true,
+      receivableTransactionId: txId,
+      billingStatus: statusLower(status).replace(/\s+/g, "_"),
+      paidAmount,
+      balanceAmount,
+      updatedFinancialAt: now,
+      timeline: arrayUnion({ at: now, by: personName(), text: "Financeiro do chamado atualizado automaticamente" })
+    }, { merge: true });
+    await recalculateCallFinancials(callId);
+    return txId;
+  }
+
+  async function upsertTransactionFromExpense(expenseId, expenseData) {
+    if (!expenseId || !expenseData || !canManageFinance()) return null;
+    const now = new Date().toISOString();
+    const call = await getDocData("calls", expenseData.callId, state.calls);
+    const linked = enrichFinancialPayloadFromCall(expenseData, call);
+    const vehicleId = linked.vehicleId || expenseData.vehicleId || "";
+    const driverId = linked.driverId || expenseData.driverId || "";
+    const amount = Number(expenseData.amount || 0);
+    const txId = sourceDocId("expense", expenseId);
+    const txRef = db.collection("transactions").doc(txId);
+    const txSnap = await txRef.get();
+    await txRef.set(Object.assign(txSnap.exists ? {} : { createdAt: now, createdBy: state.user.uid }, {
+      module: "driver_expense",
+      sourceType: "driver_expense",
+      sourceId: expenseId,
+      expenseId,
+      type: "saida",
+      date: todayInput(),
+      description: `Despesa ${expenseData.type || ""}${expenseData.driverName ? " - " + expenseData.driverName : ""}${linked.protocol ? " · " + linked.protocol : ""}`,
+      category: expenseData.type || "Despesa motorista",
+      amount,
+      status: "Pendente",
+      callId: linked.callId || "",
+      vehicleId,
+      driverId,
+      customerId: linked.customerId || "",
+      billingParty: linked.billingParty || "",
+      insurance: linked.insurance || "",
+      insuranceProtocol: linked.insuranceProtocol || "",
+      protocol: linked.protocol || "",
+      photoUrl: expenseData.photoUrl || "",
+      notes: expenseData.notes || "",
+      updatedAt: now,
+      updatedBy: state.user.uid
+    }), { merge: true });
+
+    await db.collection("expenses").doc(expenseId).set({
+      status: "aprovado",
+      approvedAt: now,
+      approvedBy: state.user.uid,
+      financialTransactionId: txId,
+      linkedCallId: linked.callId || "",
+      linkedVehicleId: vehicleId,
+      linkedDriverId: driverId,
+      customerId: linked.customerId || "",
+      billingParty: linked.billingParty || "",
+      protocol: linked.protocol || "",
+      updatedAt: now,
+      updatedBy: state.user.uid
+    }, { merge: true });
+
+    if (linked.callId) {
+      await db.collection("calls").doc(linked.callId).set({
+        costAmount: (Number(call && call.costAmount || 0) + 0),
+        timeline: arrayUnion({ at: now, by: personName(), text: `Despesa aprovada e vinculada ao financeiro: ${money(amount)}` }),
+        updatedFinancialAt: now
+      }, { merge: true });
+      await recalculateCallFinancials(linked.callId);
+    }
+
+    if (canManageFleet() && vehicleId && /manutenc|revis|óleo|oleo|pneu|freio|suspens|el[eé]tric/i.test(String(expenseData.type || "") + " " + String(expenseData.notes || ""))) {
+      const maintId = sourceDocId("expense", expenseId);
+      await db.collection("maintenance").doc(maintId).set({
+        sourceType: "driver_expense",
+        sourceExpenseId: expenseId,
+        financialTransactionId: txId,
+        vehicleId,
+        date: todayInput(),
+        description: expenseData.notes || `Despesa de ${expenseData.type || "manutenção"}`,
+        odometerKm: expenseData.odometerKm || "",
+        cost: amount,
+        status: "concluida",
+        createdAt: now,
+        createdBy: state.user.uid,
+        updatedAt: now,
+        updatedBy: state.user.uid
+      }, { merge: true });
+    }
+    return txId;
+  }
+
+  async function upsertTransactionFromMaintenance(maintenanceId, maintenanceData) {
+    if (!maintenanceId || !maintenanceData || !canManageFinance()) return null;
+    if (maintenanceData.sourceExpenseId) return maintenanceData.financialTransactionId || sourceDocId("expense", maintenanceData.sourceExpenseId);
+    const amount = Number(maintenanceData.cost || 0);
+    const txId = sourceDocId("maintenance", maintenanceId);
+    if (amount <= 0) return null;
+    const now = new Date().toISOString();
+    const vehicle = await getDocData("vehicles", maintenanceData.vehicleId, state.vehicles);
+    const ref = db.collection("transactions").doc(txId);
+    const old = await ref.get();
+    await ref.set(Object.assign(old.exists ? {} : { createdAt: now, createdBy: state.user.uid }, {
+      module: "maintenance",
+      sourceType: "maintenance",
+      sourceId: maintenanceId,
+      maintenanceId,
+      type: "saida",
+      date: maintenanceData.date || todayInput(),
+      description: `Manutenção ${vehicle && vehicle.placa || maintenanceData.vehicleId || ""} - ${maintenanceData.description || ""}`,
+      category: "Manutenção de frota",
+      amount,
+      status: maintenanceData.status === "concluida" ? "Pago" : "Pendente",
+      vehicleId: maintenanceData.vehicleId || "",
+      odometerKm: maintenanceData.odometerKm || "",
+      updatedAt: now,
+      updatedBy: state.user.uid
+    }), { merge: true });
+    await db.collection("maintenance").doc(maintenanceId).set({ financialTransactionId: txId, updatedFinancialAt: now }, { merge: true });
+    return txId;
+  }
+
   function currentStatusKey(call) {
     return operationalKey(call && (call.statusKey || call.status));
   }
@@ -254,7 +514,7 @@
     const limit = new Date(call.slaLimitAt);
     if (Number.isNaN(limit.getTime())) return { label: "SLA inválido", className: "warn", overdue: false };
     const diff = limit.getTime() - Date.now();
-    if (isFinalStatus(call)) return { label: "SLA encerrado", className: "ok", overdue: false };
+    if (isFinalStatus(call.statusKey || call.status)) return { label: "SLA encerrado", className: "ok", overdue: false };
     if (diff < 0) return { label: "SLA vencido", className: "danger", overdue: true };
     const minutes = Math.ceil(diff / 60000);
     if (minutes <= 30) return { label: "SLA em " + minutes + " min", className: "warn", overdue: false };
@@ -1254,22 +1514,19 @@ Rota: ${url}`;
       updatedAt: new Date().toISOString(),
       timeline: arrayUnion({ at: new Date().toISOString(), by: personName(), text: "Status alterado para " + label })
     };
-    if (key === "finalizado" && Number(call.valor || 0) > 0 && !call.financeCreated && canManageFinance()) {
-      updates.financeCreated = true;
-      await db.collection("transactions").add({
-        type: "entrada",
-        date: todayInput(),
-        description: `Chamado ${call.protocolo || id} - ${call.cliente || ""}`,
-        amount: Number(call.valor || 0),
-        status: "A receber",
-        callId: id,
-        vehicleId: call.vehicleId || "",
-        createdAt: new Date().toISOString(),
-        createdBy: state.user.uid
-      });
+    if (key === "finalizado" && Number(call.valor || 0) > 0) {
+      updates.billingStatus = canManageFinance() ? "a_receber" : "a_faturar";
+      updates.financePending = !canManageFinance();
     }
     await db.collection("calls").doc(id).update(updates);
-    toast("Status atualizado.", "ok");
+    if (key === "finalizado" && Number(call.valor || 0) > 0 && canManageFinance()) {
+      await upsertCallReceivable(id, { status: "A receber", amount: Number(call.valor || 0) });
+      toast("Status atualizado e conta a receber do chamado gerada automaticamente.", "ok");
+    } else if (key === "finalizado" && Number(call.valor || 0) > 0) {
+      toast("Status atualizado. Chamado entrou como a faturar para o financeiro.", "ok");
+    } else {
+      toast("Status atualizado.", "ok");
+    }
   }
 
   function editCall(id) {
@@ -1492,8 +1749,8 @@ Rota: ${url}`;
       const entrada = vehicleTx.filter((t) => t.type === "entrada").reduce((s, t) => s + Number(t.amount || 0), 0);
       const saida = vehicleTx.filter((t) => t.type === "saida").reduce((s, t) => s + Number(t.amount || 0), 0);
       const manutencao = maint.filter((m) => m.vehicleId === v.id).reduce((s, m) => s + Number(m.cost || 0), 0);
-      const lucro = entrada - saida - manutencao;
-      return `<tr><td><b>${esc(v.placa || v.id)}</b><br><span class="muted small">${esc(v.apelido || "")}</span></td><td>${esc(v.tipo || "")}</td><td><span class="badge info">${esc(v.status || "")}</span></td><td><span class="badge ${gpsBadge}">${age == null ? "sem GPS" : "há " + age + " min"}</span><br><span class="muted small">${esc(v.trackerId || v.trackerDeviceId || "")}</span></td><td>${canSeeSensitiveFinance() ? `<b>${money(lucro)}</b><br><span class="muted small">Receita ${money(entrada)} · Custo ${money(saida + manutencao)}</span>` : "Restrito"}</td></tr>`;
+      const lucro = entrada - saida;
+      return `<tr><td><b>${esc(v.placa || v.id)}</b><br><span class="muted small">${esc(v.apelido || "")}</span></td><td>${esc(v.tipo || "")}</td><td><span class="badge info">${esc(v.status || "")}</span></td><td><span class="badge ${gpsBadge}">${age == null ? "sem GPS" : "há " + age + " min"}</span><br><span class="muted small">${esc(v.trackerId || v.trackerDeviceId || "")}</span></td><td>${canSeeSensitiveFinance() ? `<b>${money(lucro)}</b><br><span class="muted small">Receita ${money(entrada)} · Custo financeiro ${money(saida)} · Manutenção registrada ${money(manutencao)}</span>` : "Restrito"}</td></tr>`;
     }).join("") + `</tbody></table>` : `<p class="muted">Nenhum veículo.</p>`;
 
     $("vehicleCards").innerHTML = rows.length ? rows.map((v) => {
@@ -1546,12 +1803,17 @@ Rota: ${url}`;
       updatedBy: state.user.uid
     };
     if (!payload.vehicleId || !payload.description) return toast("Informe veículo e serviço da manutenção.", "danger");
-    if (state.editingMaintenanceId) {
-      await db.collection("maintenance").doc(state.editingMaintenanceId).set(payload, { merge: true });
-      toast("Manutenção atualizada.", "ok");
+    let maintenanceId = state.editingMaintenanceId;
+    if (maintenanceId) {
+      await db.collection("maintenance").doc(maintenanceId).set(payload, { merge: true });
+      if (canManageFinance()) await upsertTransactionFromMaintenance(maintenanceId, Object.assign({}, state.maintenance[maintenanceId] || {}, payload));
+      toast("Manutenção atualizada e refletida no financeiro da frota.", "ok");
     } else {
-      await db.collection("maintenance").add(Object.assign({ createdAt: now, createdBy: state.user.uid }, payload));
-      toast("Manutenção registrada.", "ok");
+      const ref = db.collection("maintenance").doc();
+      maintenanceId = ref.id;
+      await ref.set(Object.assign({ createdAt: now, createdBy: state.user.uid }, payload));
+      if (canManageFinance()) await upsertTransactionFromMaintenance(maintenanceId, payload);
+      toast("Manutenção registrada e custo lançado no financeiro da frota.", "ok");
     }
     resetMaintenanceForm();
   });
@@ -1578,7 +1840,10 @@ Rota: ${url}`;
     const reason = window.prompt("Motivo para excluir a manutenção:", "Correção de lançamento");
     if (reason === null) return;
     await softDeleteDoc("maintenance", id, item, reason);
-    toast("Manutenção removida do painel com auditoria.", "ok");
+    if (item.financialTransactionId && state.transactions[item.financialTransactionId]) {
+      await softDeleteDoc("transactions", item.financialTransactionId, state.transactions[item.financialTransactionId], "Manutenção excluída: " + reason);
+    }
+    toast("Manutenção removida do painel com auditoria e financeiro vinculado baixado.", "ok");
   }
 
   function renderTeam() {
@@ -1742,9 +2007,18 @@ Rota: ${url}`;
       driverName: state.profile.nome || state.user.email,
       createdAt: new Date().toISOString()
     };
+    if (data.callId) {
+      const call = state.calls[data.callId] || {};
+      data.vehicleId = data.vehicleId || call.vehicleId || "";
+      data.customerId = call.customerId || "";
+      data.billingParty = callDisplayName(call);
+      data.protocol = callProtocolLabel(call, data.callId);
+      data.insurance = call.insurance || "";
+      data.insuranceProtocol = call.insuranceProtocol || "";
+    }
     await db.collection("expenses").add(data);
     e.target.reset();
-    toast("Despesa enviada para aprovação.", "ok");
+    toast("Despesa enviada para aprovação já vinculada ao chamado/veículo.", "ok");
   });
 
   function renderFinance() {
@@ -1755,29 +2029,41 @@ Rota: ${url}`;
       return;
     }
     const rows = visibleRows(state.transactions).sort((a, b) => String(b.createdAt || b.date || "").localeCompare(String(a.createdAt || a.date || "")));
-    const entradas = rows.filter((t) => t.type === "entrada").reduce((s, t) => s + Number(t.amount || 0), 0);
+    const entradas = rows.filter((t) => t.type === "entrada" && t.module !== "payments_shadow").reduce((s, t) => s + Number(t.amount || 0), 0);
     const saidas = rows.filter((t) => t.type === "saida").reduce((s, t) => s + Number(t.amount || 0), 0);
-    $("financeTable").innerHTML = `<div class="finance-summary"><span>Receitas <b>${money(entradas)}</b></span><span>Despesas <b>${money(saidas)}</b></span><span>Lucro bruto <b>${money(entradas - saidas)}</b></span></div><table><thead><tr><th>Data</th><th>Tipo</th><th>Descrição</th><th>Vínculos</th><th>Status</th><th>Valor</th><th>Ações</th></tr></thead><tbody>` +
+    const toBill = visibleRows(state.calls).filter((c) => Number(c.valor || 0) > 0 && (isFinalStatus(c.statusKey || c.status) || /faturar|receber/i.test(String(c.billingStatus || ""))) && !c.receivableTransactionId);
+    const billingQueue = toBill.length ? `<div class="workflow-box warn"><b>Chamados finalizados/a faturar sem financeiro oficial</b><div class="table-wrap"><table><thead><tr><th>Chamado</th><th>Cliente/seguradora</th><th>Veículo</th><th>Valor</th><th>Ação</th></tr></thead><tbody>${toBill.map((c) => {
+      const vehicle = state.vehicles[c.vehicleId] || {};
+      return `<tr><td>${esc(c.protocolo || c.id)}</td><td>${esc(callDisplayName(c))}</td><td>${esc(vehicle.placa || c.vehicleId || "-")}</td><td><b>${money(c.valor || 0)}</b></td><td><button class="btn good" onclick="JM.app.generateCallReceivable('${esc(c.id)}')">Gerar cobrança</button></td></tr>`;
+    }).join("")}</tbody></table></div></div>` : "";
+    $("financeTable").innerHTML = `<div class="finance-summary"><span>Receitas <b>${money(entradas)}</b></span><span>Despesas <b>${money(saidas)}</b></span><span>Lucro bruto <b>${money(entradas - saidas)}</b></span></div>${billingQueue}<table><thead><tr><th>Data</th><th>Tipo</th><th>Descrição</th><th>Vínculos</th><th>Status</th><th>Valor</th><th>Ações</th></tr></thead><tbody>` +
       rows.map((t) => {
         const call = state.calls[t.callId] || {};
         const vehicle = state.vehicles[t.vehicleId] || {};
         const driver = state.users[t.driverId] || {};
-        return `<tr><td>${esc(t.date || dateTime(t.createdAt))}</td><td>${esc(t.type || "")}</td><td>${esc(t.description || "")}<br><span class="muted small">${esc(t.category || "")}</span></td><td><span class="muted small">${esc(call.protocolo || t.callId || "Sem chamado")}<br>${esc(vehicle.placa || t.vehicleId || "Sem veículo")}<br>${esc(driver.nome || t.driverName || "")}</span></td><td>${esc(t.status || "")}</td><td><b>${money(t.amount || 0)}</b></td><td class="row-actions"><button class="btn" onclick="JM.app.editTransaction('${esc(t.id)}')">Editar</button><button class="btn danger" onclick="JM.app.deleteTransaction('${esc(t.id)}')">Excluir</button></td></tr>`;
+        const paidLine = t.paidAmount != null || t.balanceAmount != null ? `<br><span class="muted small">Pago ${money(t.paidAmount || 0)} · Saldo ${money(t.balanceAmount || 0)}</span>` : "";
+        return `<tr><td>${esc(t.date || dateTime(t.createdAt))}<br><span class="muted small">${esc(t.module || t.sourceType || "manual")}</span></td><td>${esc(t.type || "")}</td><td>${esc(t.description || "")}<br><span class="muted small">${esc(t.category || "")}</span></td><td><span class="muted small">${esc(call.protocolo || t.protocol || t.callId || "Sem chamado")}<br>${esc(vehicle.placa || t.vehicleId || "Sem veículo")}<br>${esc(driver.nome || t.driverName || t.driverId || "")}</span></td><td>${esc(t.status || "")}${paidLine}</td><td><b>${money(t.amount || 0)}</b></td><td class="row-actions"><button class="btn" onclick="JM.app.editTransaction('${esc(t.id)}')">Editar</button><button class="btn danger" onclick="JM.app.deleteTransaction('${esc(t.id)}')">Excluir</button></td></tr>`;
       }).join("") +
       `</tbody></table>${reportSignature()}`;
     const pending = visibleRows(state.expenses).filter((e) => e.status === "pendente");
-    $("expenseApproval").innerHTML = pending.length ? `<table><thead><tr><th>Motorista</th><th>Tipo</th><th>Valor</th><th>Obs</th><th>Ações</th></tr></thead><tbody>` +
-      pending.map((e) => `<tr>
-        <td>${esc(e.driverName || e.driverId)}</td><td>${esc(e.type || "")}</td><td><b>${money(e.amount || 0)}</b></td>
+    $("expenseApproval").innerHTML = pending.length ? `<table><thead><tr><th>Motorista</th><th>Vínculos</th><th>Tipo</th><th>Valor</th><th>Obs</th><th>Ações</th></tr></thead><tbody>` +
+      pending.map((e) => {
+        const call = state.calls[e.callId] || {};
+        const vehicle = state.vehicles[e.vehicleId || call.vehicleId] || {};
+        return `<tr>
+        <td>${esc(e.driverName || e.driverId)}</td><td><span class="muted small">${esc(call.protocolo || e.protocol || e.callId || "Sem chamado")}<br>${esc(vehicle.placa || e.vehicleId || "Sem veículo")}<br>${esc(e.billingParty || callDisplayName(call) || "")}</span></td><td>${esc(e.type || "")}</td><td><b>${money(e.amount || 0)}</b></td>
         <td>${esc(e.notes || "")}${e.photoUrl ? `<br><a class="info" href="${esc(e.photoUrl)}" target="_blank">Comprovante</a>` : ""}</td>
         <td><button class="btn good" onclick="JM.app.approveExpense('${esc(e.id)}')">Aprovar</button><button class="btn danger" onclick="JM.app.rejectExpense('${esc(e.id)}')">Reprovar</button></td>
-      </tr>`).join("") + `</tbody></table>` : `<p class="muted">Sem despesas pendentes de aprovação.</p>`;
+      </tr>`;
+      }).join("") + `</tbody></table>` : `<p class="muted">Sem despesas pendentes de aprovação.</p>`;
   }
 
   $("financeForm").onsubmit = async (e) => {
     e.preventDefault();
     if (!canManageFinance()) return toast("Somente gestor/dono ou financeiro pode lançar.", "danger");
-    const payload = {
+    const callId = $("finCall") ? $("finCall").value : "";
+    const call = callId ? await getDocData("calls", callId, state.calls) : null;
+    let payload = {
       type: $("finType").value,
       date: $("finDate").value,
       description: $("finDesc").value.trim(),
@@ -1785,19 +2071,25 @@ Rota: ${url}`;
       status: $("finStatus").value,
       category: $("finCategory") ? $("finCategory").value.trim() : "",
       customerId: $("finCustomer") ? $("finCustomer").value : "",
-      callId: $("finCall") ? $("finCall").value : "",
+      callId,
       vehicleId: $("finVehicle") ? $("finVehicle").value : "",
       driverId: $("finDriver") ? $("finDriver").value : "",
+      module: "manual_finance",
+      sourceType: "manual_finance",
       updatedAt: new Date().toISOString(),
       updatedBy: state.user.uid
     };
-    if (state.editingTransactionId) {
-      await db.collection("transactions").doc(state.editingTransactionId).set(payload, { merge: true });
-      toast("Lançamento atualizado.", "ok");
+    payload = enrichFinancialPayloadFromCall(payload, call);
+    let savedId = state.editingTransactionId;
+    if (savedId) {
+      await db.collection("transactions").doc(savedId).set(payload, { merge: true });
+      toast("Lançamento atualizado e vínculos recalculados.", "ok");
     } else {
-      await db.collection("transactions").add(Object.assign({ createdAt: new Date().toISOString(), createdBy: state.user.uid }, payload));
-      toast("Lançamento salvo.", "ok");
+      const ref = await db.collection("transactions").add(Object.assign({ createdAt: new Date().toISOString(), createdBy: state.user.uid }, payload));
+      savedId = ref.id;
+      toast("Lançamento salvo e vinculado automaticamente.", "ok");
     }
+    if (payload.callId) await recalculateCallFinancials(payload.callId);
     resetFinanceForm();
   };
 
@@ -1810,8 +2102,8 @@ Rota: ${url}`;
     const rows = visibleRows(state.transactions)
       .filter((t) => t.module === "payments" || t.customerId || t.billingParty)
       .sort((a, b) => String(b.dueDate || b.date || b.createdAt || "").localeCompare(String(a.dueDate || a.date || a.createdAt || "")));
-    const receber = rows.filter((t) => t.type === "entrada" && String(t.status || "").toLowerCase() !== "recebido").reduce((s, t) => s + Number(t.amount || 0), 0);
-    const pagar = rows.filter((t) => t.type === "saida" && !/pago/i.test(String(t.status || ""))).reduce((s, t) => s + Number(t.amount || 0), 0);
+    const receber = rows.filter((t) => t.type === "entrada" && !statusMeansReceived(t.status)).reduce((s, t) => s + Number(t.balanceAmount != null ? t.balanceAmount : t.amount || 0), 0);
+    const pagar = rows.filter((t) => t.type === "saida" && !statusMeansReceived(t.status)).reduce((s, t) => s + Number(t.amount || 0), 0);
     $("paymentsSummary").innerHTML = `<div class="finance-summary"><span>A receber <b>${money(receber)}</b></span><span>A pagar <b>${money(pagar)}</b></span><span>Registros <b>${rows.length}</b></span></div>`;
     $("paymentsTable").innerHTML = rows.length ? `<table><thead><tr><th>Vencimento</th><th>Cliente/seguradora</th><th>Documento</th><th>Status</th><th>Valor</th><th>Ações</th></tr></thead><tbody>` + rows.map((p) => {
       const customer = state.customers[p.customerId] || {};
@@ -1819,19 +2111,49 @@ Rota: ${url}`;
         <td>${esc(p.dueDate || p.date || "")}<br><span class="muted small">${esc(p.paymentMethod || "")}</span></td>
         <td><b>${esc(customer.name || p.billingParty || "")}</b><br><span class="muted small">${esc(p.category || "")}</span></td>
         <td>${esc(p.invoiceNumber || p.description || "")}<br><span class="muted small">${esc(p.callId || "")}</span></td>
-        <td><span class="badge ${/recebido|pago/i.test(String(p.status || "")) ? "ok" : "warn"}">${esc(p.status || "")}</span></td>
+        <td><span class="badge ${statusMeansReceived(p.status) ? "ok" : "warn"}">${esc(p.status || "")}</span>${p.paidAmount != null || p.balanceAmount != null ? `<br><span class="muted small">Pago ${money(p.paidAmount || 0)} · Saldo ${money(p.balanceAmount || 0)}</span>` : ""}</td>
         <td><b>${money(p.amount || 0)}</b></td>
         <td class="row-actions"><button class="btn" onclick="JM.app.editPayment('${esc(p.id)}')">Editar</button><button class="btn danger" onclick="JM.app.deleteTransaction('${esc(p.id)}')">Excluir</button></td>
       </tr>`;
     }).join("") + `</tbody></table>` : `<p class="muted">Nenhum pagamento cadastrado para clientes/seguradoras.</p>`;
   }
 
+  function fillPaymentFromCall() {
+    const callId = $("payCall") && $("payCall").value;
+    const call = callId && state.calls[callId];
+    if (!call) return;
+    const customer = call.customerId && state.customers[call.customerId] || null;
+    setValue("payCustomer", call.customerId || "");
+    setValue("payBillingParty", customer && customer.name || callDisplayName(call));
+    if (!$("payDescription").value) setValue("payDescription", `Recebimento chamado ${callProtocolLabel(call, callId)} - ${callDisplayName(call)}`);
+    if (!$("payCategory").value) setValue("payCategory", call.insurance ? "Seguradora" : "Receita de chamado");
+    if (!parseMoney($("payAmount").value)) setValue("payAmount", call.balanceAmount || call.valor || "");
+    if ($("payStatus") && (!$("payStatus").value || $("payStatus").value === "A receber")) setValue("payStatus", "Recebido");
+    toast("Dados do chamado puxados para o recebimento.", "ok");
+  }
+
+  function fillFinanceFromCall() {
+    const callId = $("finCall") && $("finCall").value;
+    const call = callId && state.calls[callId];
+    if (!call) return;
+    setValue("finCustomer", call.customerId || "");
+    setValue("finVehicle", call.vehicleId || "");
+    setValue("finDriver", call.driverId || "");
+    if (!$("finDesc").value) setValue("finDesc", `Chamado ${callProtocolLabel(call, callId)} - ${callDisplayName(call)}`);
+    if (!$("finCategory").value) setValue("finCategory", call.insurance ? "Seguradora" : "Receita de chamado");
+    if (!parseMoney($("finAmount").value)) setValue("finAmount", call.valor || "");
+    toast("Chamado vinculado: veículo, motorista e cliente preenchidos.", "ok");
+  }
+
   $("paymentForm") && ($("paymentForm").onsubmit = async (e) => {
     e.preventDefault();
     if (!canManageFinance()) return toast("Somente gestor/dono ou financeiro pode gerir pagamentos.", "danger");
     const customer = $("payCustomer").value ? state.customers[$("payCustomer").value] || null : null;
-    const payload = {
+    const callId = $("payCall").value;
+    const call = callId ? await getDocData("calls", callId, state.calls) : null;
+    let payload = {
       module: "payments",
+      sourceType: "payment",
       type: $("payType").value,
       date: $("payDate").value || todayInput(),
       dueDate: $("payDueDate").value || $("payDate").value || todayInput(),
@@ -1843,20 +2165,45 @@ Rota: ${url}`;
       category: $("payCategory").value.trim(),
       customerId: $("payCustomer").value,
       billingParty: customer && customer.name || $("payBillingParty").value.trim(),
-      callId: $("payCall").value,
+      callId,
       updatedAt: new Date().toISOString(),
       updatedBy: state.user.uid
     };
-    if (!payload.billingParty && !payload.customerId) return toast("Selecione ou informe quem vai pagar/receber.", "danger");
-    if (state.editingPaymentId) {
+    payload = enrichFinancialPayloadFromCall(payload, call);
+    if (!payload.billingParty && !payload.customerId && !payload.callId) return toast("Selecione ou informe quem vai pagar/receber.", "danger");
+
+    if (payload.callId && payload.type === "entrada") {
+      const txId = await upsertCallReceivable(payload.callId, {
+        date: payload.date,
+        dueDate: payload.dueDate,
+        description: payload.description || undefined,
+        amount: payload.amount,
+        paidAmount: statusMeansReceived(payload.status) ? payload.amount : 0,
+        status: payload.status,
+        paymentMethod: payload.paymentMethod,
+        invoiceNumber: payload.invoiceNumber,
+        category: payload.category || "Receita de chamado"
+      });
+      state.editingPaymentId = txId || state.editingPaymentId;
+      toast("Recebimento salvo no financeiro e no chamado, sem lançar duas vezes.", "ok");
+    } else if (state.editingPaymentId) {
       await db.collection("transactions").doc(state.editingPaymentId).set(payload, { merge: true });
-      toast("Pagamento atualizado.", "ok");
+      if (payload.callId) await recalculateCallFinancials(payload.callId);
+      toast("Pagamento atualizado e vínculos recalculados.", "ok");
     } else {
-      await db.collection("transactions").add(Object.assign({ createdAt: new Date().toISOString(), createdBy: state.user.uid }, payload));
-      toast("Pagamento cadastrado.", "ok");
+      const ref = await db.collection("transactions").add(Object.assign({ createdAt: new Date().toISOString(), createdBy: state.user.uid }, payload));
+      if (payload.callId) await recalculateCallFinancials(payload.callId);
+      state.editingPaymentId = ref.id;
+      toast("Pagamento cadastrado e vinculado automaticamente.", "ok");
     }
     resetPaymentForm();
   });
+
+  async function generateCallReceivable(id) {
+    if (!canManageFinance()) return toast("Somente gestor/dono ou financeiro pode gerar cobrança.", "danger");
+    const txId = await upsertCallReceivable(id, { status: "A receber" });
+    if (txId) toast("Cobrança do chamado gerada no financeiro e em pagamentos.", "ok");
+  }
 
   function editPayment(id) {
     const tx = state.transactions[id];
@@ -1905,28 +2252,17 @@ Rota: ${url}`;
     const reason = window.prompt("Motivo para excluir o lançamento financeiro:", "Correção financeira");
     if (reason === null) return;
     await softDeleteDoc("transactions", id, tx, reason);
+    if (tx.callId) await recalculateCallFinancials(tx.callId);
     if (state.editingTransactionId === id) resetFinanceForm();
-    toast("Lançamento removido do painel com auditoria.", "ok");
+    if (state.editingPaymentId === id) resetPaymentForm();
+    toast("Lançamento removido do painel com auditoria e vínculos recalculados.", "ok");
   }
 
   async function approveExpense(id) {
     const expense = state.expenses[id];
     if (!expense || !canManageFinance()) return;
-    await db.collection("expenses").doc(id).update({ status: "aprovado", approvedAt: new Date().toISOString(), approvedBy: state.user.uid });
-    await db.collection("transactions").add({
-      type: "saida",
-      date: todayInput(),
-      description: `Despesa ${expense.type || ""} - ${expense.driverName || ""}`,
-      amount: Number(expense.amount || 0),
-      status: "Pendente",
-      expenseId: id,
-      callId: expense.callId || "",
-      vehicleId: expense.vehicleId || "",
-      driverId: expense.driverId || "",
-      createdAt: new Date().toISOString(),
-      createdBy: state.user.uid
-    });
-    toast("Despesa aprovada e lançada no financeiro.", "ok");
+    await upsertTransactionFromExpense(id, expense);
+    toast("Despesa aprovada, vinculada ao chamado/veículo e refletida no financeiro.", "ok");
   }
 
   async function rejectExpense(id) {
@@ -1965,6 +2301,8 @@ Rota: ${url}`;
     if ($("paymentCancelEdit")) $("paymentCancelEdit").onclick = resetPaymentForm;
     if ($("customerCancelEdit")) $("customerCancelEdit").onclick = resetCustomerForm;
     if ($("maintenanceCancelEdit")) $("maintenanceCancelEdit").onclick = resetMaintenanceForm;
+    if ($("payCall")) $("payCall").onchange = fillPaymentFromCall;
+    if ($("finCall")) $("finCall").onchange = fillFinanceFromCall;
   }
 
   function boot() {
@@ -1994,6 +2332,7 @@ Rota: ${url}`;
     deleteTeamMember,
     editTransaction,
     editPayment,
+    generateCallReceivable,
     deleteTransaction,
     editCustomer,
     deleteCustomer,
