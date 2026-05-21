@@ -4,7 +4,7 @@
   const { $, esc, parseMoney, toast, statusClass, routeKm, mapsRouteUrl, statusKey, statusLabel, isFinalStatus, setupCollapsiblePanels } = window.JM.utils;
   const { auth, db, arrayUnion } = window.JM.firebase;
   const cfg = window.JM_CONFIG || {};
-  const DRIVER_FLOW_VERSION = "jm-v19-1-mobile-gps-real";
+  const DRIVER_FLOW_VERSION = "jm-v19-3-provas-minimizacao-definitiva";
   const state = { user: null, profile: null, calls: {}, vehicles: {}, expenses: {}, settings: {} };
   const unsubscribers = [];
   let driverLocationWatchId = null;
@@ -60,8 +60,10 @@
   }
 
   function proofStatusFor(call) {
-    const missingPhotos = REQUIRED_PHOTOS.filter((photo) => !hasPhotoType(call, photo.key)).length;
     if (!call) return "pendente";
+    const checklist = call.proofChecklist || {};
+    const requiredPhotos = requiredProofPhotosForChecklist(checklist);
+    const missingPhotos = requiredPhotos.filter((photo) => !hasPhotoType(call, photo.key)).length;
     if (missingPhotos === 0 && hasCompleteChecklist(call) && hasSignature(call)) return "completo";
     if (proofPhotos(call).length || call.proofChecklist || call.customerSignature) return "parcial";
     return "pendente";
@@ -127,6 +129,63 @@
 
   function activeCloudinaryConfig() {
     return mergeNonEmpty(cfg.cloudinary || {}, state.settings.cloudinary || {});
+  }
+
+  function setProofSubmitStatus(message, type, alsoToast) {
+    const box = $("driverProofStatus");
+    const kind = type || "info";
+    if (box) {
+      box.textContent = message;
+      box.className = "wide proof-submit-status " + kind;
+      box.hidden = false;
+      try { box.scrollIntoView({ behavior: "smooth", block: "nearest" }); } catch (_) {}
+    }
+    if (alsoToast !== false) toast(message, kind === "success" ? "ok" : kind);
+  }
+
+  function requiredProofPhotosForChecklist(checklist) {
+    const hasAvaria = Object.values(checklist || {}).some((item) => item && String(item.status || "").toLowerCase().includes("avaria"));
+    return REQUIRED_PHOTOS.filter((photo) => photo.key !== "damage" || hasAvaria);
+  }
+
+  function proofPhotoLabelList(photos) {
+    return (photos || []).map((photo) => photo.label || photo.key).join(", ");
+  }
+
+  function imageFileToCanvas(file, maxSide, quality) {
+    return new Promise((resolve) => {
+      if (!file || !/^image\//i.test(file.type || "")) return resolve(file);
+      const img = new Image();
+      const url = URL.createObjectURL(file);
+      img.onload = () => {
+        try {
+          const width = img.naturalWidth || img.width;
+          const height = img.naturalHeight || img.height;
+          const biggest = Math.max(width, height);
+          if (!width || !height || biggest <= maxSide) {
+            URL.revokeObjectURL(url);
+            return resolve(file);
+          }
+          const scale = maxSide / biggest;
+          const canvas = document.createElement("canvas");
+          canvas.width = Math.max(1, Math.round(width * scale));
+          canvas.height = Math.max(1, Math.round(height * scale));
+          const ctx = canvas.getContext("2d");
+          ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+          canvas.toBlob((blob) => {
+            URL.revokeObjectURL(url);
+            if (!blob) return resolve(file);
+            const name = String(file.name || "foto.jpg").replace(/\.[a-z0-9]+$/i, "") + ".jpg";
+            resolve(new File([blob], name, { type: "image/jpeg", lastModified: Date.now() }));
+          }, "image/jpeg", quality || 0.82);
+        } catch (_) {
+          URL.revokeObjectURL(url);
+          resolve(file);
+        }
+      };
+      img.onerror = () => { URL.revokeObjectURL(url); resolve(file); };
+      img.src = url;
+    });
   }
 
   function getCurrentPositionSafe() {
@@ -504,17 +563,61 @@
 
   async function uploadToCloudinaryAsset(file, options) {
     const cloud = activeCloudinaryConfig();
-    if (!file || !cloud.cloudName || !cloud.uploadPreset) return null;
-    const form = new FormData();
-    if (options && options.fileName) form.append("file", file, options.fileName);
-    else form.append("file", file);
-    form.append("upload_preset", cloud.uploadPreset);
-    form.append("folder", [cloud.folder || "jm-guinchos", options && options.folder].filter(Boolean).join("/"));
-    const response = await fetch(`https://api.cloudinary.com/v1_1/${cloud.cloudName}/upload`, { method: "POST", body: form });
-    if (!response.ok) throw new Error("Cloudinary recusou o upload.");
-    const data = await response.json();
+    if (!file) return null;
+    if (!cloud.cloudName || !cloud.uploadPreset) {
+      throw new Error("Cloudinary não configurado: salve cloudName e uploadPreset no superadmin antes de enviar fotos.");
+    }
+    const preparedFile = await imageFileToCanvas(file, 1600, 0.82);
+    const endpoint = `https://api.cloudinary.com/v1_1/${cloud.cloudName}/upload`;
+
+    function buildForm(withFolder) {
+      const form = new FormData();
+      if (options && options.fileName) form.append("file", preparedFile, options.fileName);
+      else form.append("file", preparedFile);
+      form.append("upload_preset", cloud.uploadPreset);
+      if (withFolder) {
+        const folder = [cloud.folder || "jm-guinchos", options && options.folder].filter(Boolean).join("/");
+        if (folder) form.append("folder", folder);
+      }
+      return form;
+    }
+
+    async function send(withFolder) {
+      const controller = window.AbortController ? new AbortController() : null;
+      const timer = controller ? setTimeout(() => controller.abort(), 45000) : null;
+      let response;
+      try {
+        response = await fetch(endpoint, { method: "POST", body: buildForm(withFolder), signal: controller && controller.signal });
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
+      let data = null;
+      try { data = await response.json(); } catch (_) {}
+      if (!response.ok) {
+        const detail = data && data.error && data.error.message ? data.error.message : "Cloudinary recusou o upload.";
+        const err = new Error(detail);
+        err.status = response.status;
+        throw err;
+      }
+      return data || {};
+    }
+
+    let data;
+    try {
+      data = await send(true);
+    } catch (err) {
+      const msg = String(err && err.message || "").toLowerCase();
+      if (err && err.name === "AbortError") throw new Error("Tempo esgotado ao enviar para o Cloudinary. Teste com uma foto menor ou confira a internet do celular.");
+      if (/folder|public_id|parameter|not allowed|disallowed|unsigned|preset/i.test(msg)) {
+        data = await send(false);
+      } else {
+        throw err;
+      }
+    }
+
+    if (!data.secure_url && !data.url) throw new Error("Cloudinary respondeu, mas não devolveu URL do arquivo.");
     return {
-      cloudinaryUrl: data.secure_url || "",
+      cloudinaryUrl: data.secure_url || data.url || "",
       publicId: data.public_id || "",
       resourceType: data.resource_type || "image",
       bytes: data.bytes || 0,
@@ -594,18 +697,16 @@
   $("driverProofForm") && ($("driverProofForm").onsubmit = async (e) => {
     e.preventDefault();
     const submit = e.submitter || document.querySelector("#driverProofForm button[type='submit']");
-    const callId = $("driverProofCall").value;
-    const call = state.calls[callId];
-    if (!call) return toast("Selecione um chamado ativo para salvar as provas.", "danger");
-    const cloud = activeCloudinaryConfig();
-    if (!cloud.cloudName || !cloud.uploadPreset) {
-      return toast("Cloudinary não está configurado. Peça ao superadmin para salvar cloudName e uploadPreset antes de enviar fotos/assinatura.", "danger");
-    }
+    const callId = $("driverProofCall") && $("driverProofCall").value;
+    const call = callId && state.calls[callId];
+    if (!call) return setProofSubmitStatus("Selecione um chamado ativo para salvar as provas.", "danger");
+
     const acceptedText = $("signatureAcceptedText").value.trim();
-    if (!acceptedText) return toast("O aceite textual é obrigatório para a assinatura do cliente.", "danger");
-    if (!signaturePad || !signaturePad.dirty && !hasSignature(call)) {
-      return toast("Colete a assinatura do cliente final na tela antes de salvar as provas.", "danger");
-    }
+    if (!acceptedText) return setProofSubmitStatus("O aceite textual é obrigatório para registrar as provas do atendimento.", "danger");
+    const hasNewSignature = !!(signaturePad && signaturePad.dirty);
+    const hasExistingSignature = hasSignature(call);
+    const signatureMissing = !hasNewSignature && !hasExistingSignature;
+
     const checklist = {
       retirada: { status: $("proofStageRetirada").value, label: "Retirada" },
       carregamento: { status: $("proofStageCarregamento").value, label: "Carregamento" },
@@ -617,42 +718,59 @@
       updatedBy: state.user.uid
     };
     if (PROOF_STAGES.some((stage) => checklist[stage].status === "pendente")) {
-      return toast("Nenhuma etapa do checklist pode ficar pendente para fechar o atendimento.", "danger");
+      return setProofSubmitStatus("Nenhuma etapa do checklist pode ficar pendente para fechar o atendimento.", "danger");
     }
+
+    const requiredPhotos = requiredProofPhotosForChecklist(checklist);
     const existingPhotos = proofPhotos(call);
-    const missingPhoto = REQUIRED_PHOTOS.find((photo) => {
+    const missingPhoto = requiredPhotos.find((photo) => {
       const input = $(photo.input);
       return !hasPhotoType(call, photo.key) && !(input && input.files && input.files[0]);
     });
-    if (missingPhoto) return toast("Foto obrigatória faltando: " + missingPhoto.label + ".", "danger");
+    if (missingPhoto) {
+      return setProofSubmitStatus("Foto obrigatória faltando: " + missingPhoto.label + ".", "danger");
+    }
+
+    const cloud = activeCloudinaryConfig();
+    if (!cloud.cloudName || !cloud.uploadPreset) {
+      return setProofSubmitStatus("Cloudinary não configurado. Entre no superadmin e salve cloudName e uploadPreset antes de enviar fotos e assinatura.", "danger");
+    }
+
     submit.disabled = true;
+    submit.dataset.originalText = submit.dataset.originalText || submit.textContent;
     submit.textContent = "Enviando provas...";
+    setProofSubmitStatus("Iniciando envio das provas. Não feche esta tela.", "info", false);
+
     try {
       const gps = await getCurrentPositionSafe();
       const uploadedPhotos = [];
-      for (const photo of REQUIRED_PHOTOS) {
+      for (let i = 0; i < requiredPhotos.length; i += 1) {
+        const photo = requiredPhotos[i];
         const input = $(photo.input);
         const file = input && input.files && input.files[0];
         if (!file) continue;
+        setProofSubmitStatus(`Enviando ${i + 1}/${requiredPhotos.length}: ${photo.label}...`, "info", false);
         const asset = await uploadToCloudinaryAsset(file, { folder: "provas/" + callId });
-        if (asset && asset.cloudinaryUrl) {
-          uploadedPhotos.push(Object.assign({}, asset, {
-            type: photo.key,
-            label: photo.label,
-            callId,
-            uploadedBy: state.user.uid,
-            uploadedByName: state.profile.nome || state.user.email
-          }));
-        }
+        if (!asset || !asset.cloudinaryUrl) throw new Error("Upload sem URL retornada para " + photo.label + ".");
+        uploadedPhotos.push(Object.assign({}, asset, {
+          type: photo.key,
+          label: photo.label,
+          callId,
+          uploadedBy: state.user.uid,
+          uploadedByName: state.profile.nome || state.user.email
+        }));
       }
+
       const replacedTypes = new Set(uploadedPhotos.map((photo) => photo.type));
       const proofPhotosMerged = existingPhotos.filter((photo) => !replacedTypes.has(photo.type)).concat(uploadedPhotos);
       let customerSignature = call.customerSignature || null;
       const sigBlob = await signatureBlob();
       if (sigBlob) {
+        setProofSubmitStatus("Enviando assinatura do cliente...", "info", false);
         const sigAsset = await uploadToCloudinaryAsset(sigBlob, { folder: "assinaturas/" + callId, fileName: "assinatura-" + callId + ".png" });
+        if (!sigAsset || !sigAsset.cloudinaryUrl) throw new Error("A assinatura foi enviada, mas não retornou URL.");
         customerSignature = Object.assign({}, sigAsset, {
-          signatureUrl: sigAsset && sigAsset.cloudinaryUrl || "",
+          signatureUrl: sigAsset.cloudinaryUrl || "",
           name: $("signatureCustomerName").value.trim(),
           document: $("signatureCustomerDoc").value.trim(),
           acceptedText,
@@ -662,10 +780,12 @@
           driverName: state.profile.nome || state.user.email
         });
       } else if (customerSignature) {
-        customerSignature = Object.assign({}, customerSignature, { acceptedText });
+        customerSignature = Object.assign({}, customerSignature, { acceptedText, reusedAt: new Date().toISOString() });
       }
+
       const nextCall = Object.assign({}, call, { proofChecklist: checklist, proofPhotos: proofPhotosMerged, customerSignature });
-      const nextProofStatus = proofStatusFor(nextCall);
+      const nextProofStatus = signatureMissing ? "parcial" : proofStatusFor(nextCall);
+      setProofSubmitStatus("Salvando provas no chamado...", "info", false);
       await db.collection("calls").doc(callId).set({
         proofChecklist: checklist,
         proofPhotos: proofPhotosMerged,
@@ -673,35 +793,51 @@
         proofStatus: nextProofStatus,
         proofUpdatedAt: new Date().toISOString(),
         proofUpdatedBy: state.user.uid,
+        billingStatus: nextProofStatus === "completo" && call.billingStatus === "aguardando_provas" ? "a_faturar" : call.billingStatus || "aberto",
         timeline: arrayUnion({ at: new Date().toISOString(), by: state.profile.nome || state.user.email, text: "Motorista salvou checklist, fotos e assinatura do cliente" }),
         updatedAt: new Date().toISOString()
       }, { merge: true });
-      await db.collection("callProofs").add({
-        callId,
-        driverId: state.user.uid,
-        driverName: state.profile.nome || state.user.email,
-        vehicleId: call.vehicleId || "",
-        customerId: call.customerId || "",
-        protocol: callProtocolLabel(call, callId),
-        insurance: call.insurance || "",
-        checklist,
-        photos: uploadedPhotos,
-        customerSignature,
-        proofStatus: nextProofStatus,
-        gps,
-        createdAt: new Date().toISOString()
-      });
+
+      let auditWarning = "";
+      try {
+        await db.collection("callProofs").add({
+          callId,
+          driverId: state.user.uid,
+          driverName: state.profile.nome || state.user.email,
+          vehicleId: call.vehicleId || "",
+          customerId: call.customerId || "",
+          protocol: callProtocolLabel(call, callId),
+          insurance: call.insurance || "",
+          checklist,
+          photos: uploadedPhotos,
+          customerSignature,
+          proofStatus: nextProofStatus,
+          gps,
+          createdAt: new Date().toISOString()
+        });
+      } catch (proofLogErr) {
+        auditWarning = " As provas foram salvas no chamado, mas o histórico callProofs não gravou: " + (proofLogErr && (proofLogErr.code || proofLogErr.message) || "sem detalhe") + ".";
+        try {
+          await db.collection("calls").doc(callId).set({ proofLogWarning: auditWarning, proofLogWarningAt: new Date().toISOString() }, { merge: true });
+        } catch (_) {}
+      }
+
       e.target.reset();
       if (signaturePad) {
         signaturePad.ctx.clearRect(0, 0, signaturePad.canvas.width, signaturePad.canvas.height);
         signaturePad.dirty = false;
       }
-      toast(nextProofStatus === "completo" ? "Provas completas. O chamado já pode ser finalizado." : "Provas salvas parcialmente.", nextProofStatus === "completo" ? "ok" : "warn");
+      const savedLabels = proofPhotoLabelList(uploadedPhotos) || "nenhuma foto nova, dados atualizados";
+      const okMsg = nextProofStatus === "completo"
+        ? "Provas completas e salvas. O chamado já pode ser finalizado." + auditWarning
+        : "Provas salvas parcialmente: " + savedLabels + (signatureMissing ? ". Falta coletar a assinatura para liberar finalização." : ".") + auditWarning;
+      setProofSubmitStatus(okMsg, auditWarning ? "warn" : "success");
     } catch (err) {
-      toast("Não consegui salvar as provas: " + (err && err.message || "falha operacional"), "danger");
+      const detail = err && (err.code || err.message) || "falha operacional";
+      setProofSubmitStatus("Não consegui salvar as provas: " + detail, "danger");
     } finally {
       submit.disabled = false;
-      submit.textContent = "Salvar provas e assinatura";
+      submit.textContent = submit.dataset.originalText || "Salvar provas e assinatura";
     }
   });
 

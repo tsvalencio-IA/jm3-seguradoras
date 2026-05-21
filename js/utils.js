@@ -332,62 +332,97 @@
     const cfg = Object.assign({ collapseOnMobile: true, openFirst: 2 }, options || {});
     const mobile = window.matchMedia && window.matchMedia("(max-width: 760px)").matches;
     const panels = $all(".panel", scope);
-    panels.forEach((panel, index) => {
-      if (!panel || panel.dataset.noCollapse === "true") return;
-      if (panel.closest(".login") || panel.classList.contains("no-collapse")) return;
 
-      const title = Array.from(panel.children).find((child) => child && child.tagName === "H2");
+    panels.forEach((panel, index) => {
+      if (!panel || panel.dataset.noCollapse === "true" || panel.classList.contains("no-collapse")) return;
+      if (panel.closest(".login")) return;
+
+      let head = panel.querySelector(":scope > .panel-collapse-head");
+      let title = head ? head.querySelector("h2,h3") : panel.querySelector(":scope > h2, :scope > h3");
       if (!title) return;
 
-      let button = panel.querySelector(":scope > .panel-collapse-toggle");
+      if (!head) {
+        head = document.createElement("div");
+        head.className = "panel-collapse-head";
+        panel.insertBefore(head, panel.firstChild);
+      }
+      if (title.parentElement !== head) head.appendChild(title);
+
+      let button = head.querySelector(":scope > .panel-collapse-toggle");
       if (!button) {
-        button = document.createElement("button");
+        button = panel.querySelector(":scope > .panel-collapse-toggle") || document.createElement("button");
         button.type = "button";
         button.className = "btn panel-collapse-toggle";
-        button.setAttribute("aria-label", "Minimizar ou maximizar " + title.textContent.trim());
-        title.insertAdjacentElement("afterend", button);
+        head.appendChild(button);
       }
 
-      const storageKey = "jm-panel-collapsed:" + location.pathname + ":" + (panel.id || title.textContent.trim().toLowerCase().replace(/\s+/g, "-"));
-      const isMapPanel = !!panel.querySelector(".map");
-      const isCriticalForm = !!panel.querySelector("#callForm,#financeForm,#paymentForm,#maintenanceForm,#driverProofForm,#driverExpenseForm");
+      let body = panel.querySelector(":scope > .panel-collapse-body");
+      if (!body) {
+        body = document.createElement("div");
+        body.className = "panel-collapse-body";
+        const move = Array.from(panel.childNodes).filter((node) => node !== head && node !== body);
+        move.forEach((node) => body.appendChild(node));
+        panel.appendChild(body);
+      } else {
+        Array.from(panel.childNodes).filter((node) => node !== head && node !== body).forEach((node) => body.appendChild(node));
+      }
 
-      function bodyChildren() {
-        return Array.from(panel.children).filter((child) => child !== title && child !== button);
+      const rawTitle = title.textContent.trim() || "painel";
+      const keyBase = panel.id || rawTitle.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || String(index);
+      const storageKey = "jm-panel-collapsed:" + location.pathname + ":" + keyBase;
+      const isMapPanel = !!body.querySelector(".map,.ops-map,#map,#driverMap");
+      const isCriticalForm = !!body.querySelector("#callForm,#financeForm,#paymentForm,#maintenanceForm,#driverProofForm,#driverExpenseForm,#driverReportForm");
+
+      panel.classList.add("is-collapsible");
+      body.setAttribute("data-panel-body", "true");
+      button.setAttribute("aria-label", "Minimizar ou maximizar " + rawTitle);
+      button.setAttribute("title", "Minimizar ou maximizar este painel");
+
+      function invalidateVisuals() {
+        setTimeout(() => {
+          try { window.dispatchEvent(new Event("resize")); } catch (_) {}
+          if (window.JM && window.JM.mapa && typeof window.JM.mapa.invalidateAll === "function") {
+            try { window.JM.mapa.invalidateAll(); } catch (_) {}
+          }
+        }, 120);
       }
 
       function setCollapsed(collapsed, persist) {
-        panel.classList.toggle("is-collapsed", collapsed);
-        panel.classList.toggle("collapsed", collapsed);
-        bodyChildren().forEach((child) => { child.hidden = collapsed; });
-        button.textContent = collapsed ? "Maximizar" : "Minimizar";
-        button.setAttribute("aria-expanded", String(!collapsed));
+        const isCollapsed = !!collapsed;
+        panel.classList.toggle("is-collapsed", isCollapsed);
+        panel.classList.toggle("collapsed", isCollapsed);
+        body.hidden = isCollapsed;
+        body.style.display = isCollapsed ? "none" : "";
+        body.setAttribute("aria-hidden", String(isCollapsed));
+        button.textContent = isCollapsed ? "Maximizar" : "Minimizar";
+        button.setAttribute("aria-expanded", String(!isCollapsed));
         if (persist !== false) {
-          try { localStorage.setItem(storageKey, collapsed ? "1" : "0"); } catch (_) {}
+          try { localStorage.setItem(storageKey, isCollapsed ? "1" : "0"); } catch (_) {}
         }
-        if (!collapsed) {
-          setTimeout(() => {
-            try { window.dispatchEvent(new Event("resize")); } catch (_) {}
-            if (window.JM && window.JM.mapa && typeof window.JM.mapa.invalidateAll === "function") window.JM.mapa.invalidateAll();
-          }, 80);
-        }
+        if (!isCollapsed) invalidateVisuals();
       }
 
-      if (panel.dataset.collapsibleReady !== "1") {
+      if (button.dataset.listenerReady !== "1") {
         button.addEventListener("click", (event) => {
           event.preventDefault();
           event.stopPropagation();
           setCollapsed(!panel.classList.contains("is-collapsed"));
         });
-        panel.dataset.collapsibleReady = "1";
+        button.dataset.listenerReady = "1";
       }
 
       let saved = null;
       try { saved = localStorage.getItem(storageKey); } catch (_) {}
-      const shouldCollapse = saved === "1" || (saved == null && mobile && cfg.collapseOnMobile && index >= Number(cfg.openFirst || 0) && !isMapPanel && !isCriticalForm);
-      setCollapsed(!!shouldCollapse, false);
+      if (panel.dataset.collapsibleReady !== "1") {
+        const shouldCollapse = saved === "1" || (saved == null && mobile && cfg.collapseOnMobile && index >= Number(cfg.openFirst || 0) && !isMapPanel && !isCriticalForm);
+        setCollapsed(shouldCollapse, false);
+        panel.dataset.collapsibleReady = "1";
+      } else {
+        setCollapsed(panel.classList.contains("is-collapsed") || body.hidden, false);
+      }
     });
   }
+
 
   window.JM = window.JM || {};
   window.JM.utils = {

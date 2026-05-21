@@ -1,0 +1,10 @@
+index.html
+jm.html
+motorista.html
+superadmin.html
+css/style.css
+js/motorista.js
+js/utils.js
+service-worker.js
+ENTREGA_V19_2_PROVAS_MINIMIZACAO_REAL.md
+LISTA_ARQUIVOS_ALTERADOS_V19_2.txt

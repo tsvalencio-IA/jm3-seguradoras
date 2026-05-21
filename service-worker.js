@@ -1,4 +1,4 @@
-const CACHE_NAME = "jm-v19-1-mobile-gps-real";
+const CACHE_NAME = "jm-v19-3-provas-minimizacao-definitiva";
 const ASSETS = [
   "./",
   "./index.html",

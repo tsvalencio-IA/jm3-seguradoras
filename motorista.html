@@ -5,9 +5,9 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#07111f">
   <title>JM Guinchos - Motorista</title>
-  <link rel="manifest" href="manifest.json?v=jm-v19-1-mobile-gps-real">
+  <link rel="manifest" href="manifest.json?v=jm-v19-3-provas-minimizacao-definitiva">
   <link rel="icon" href="assets/icon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="css/style.css?v=jm-v19-1-mobile-gps-real">
+  <link rel="stylesheet" href="css/style.css?v=jm-v19-3-provas-minimizacao-definitiva">
 </head>
 <body>
   <section id="driverLoginView" class="login">
@@ -43,11 +43,11 @@
     </header>
     <main class="content">
       <div class="grid">
-        <section class="panel col-7">
+        <section id="driverPanelCalls" class="panel col-7">
           <h2>Meus chamados</h2>
           <div id="driverCallsBox"></div>
         </section>
-        <section class="panel col-5">
+        <section id="driverPanelLocation" class="panel col-5">
           <h2>Localização do celular</h2>
           <p class="muted small">Use quando o guincho estiver sem GPS ou o sinal do rastreador atrasar. A central verá sua posição no mapa enquanto o chamado estiver ativo.</p>
           <div class="form-grid">
@@ -59,7 +59,7 @@
             <div id="driverLocationStatus" class="wide small muted">Localização do celular desligada.</div>
           </div>
         </section>
-        <section class="panel col-5">
+        <section id="driverPanelExpense" class="panel col-5">
           <h2>Lançar despesa</h2>
           <form id="driverExpenseForm" class="form-grid">
             <div class="wide"><label>Chamado</label><select id="driverExpenseCall"></select></div>
@@ -72,7 +72,7 @@
             <button class="btn good wide" type="submit">Enviar despesa</button>
           </form>
         </section>
-        <section class="panel col-5">
+        <section id="driverPanelReport" class="panel col-5">
           <h2>Relatório do atendimento</h2>
           <form id="driverReportForm" class="form-grid">
             <div class="wide"><label>Chamado</label><select id="driverReportCall"></select></div>
@@ -82,7 +82,7 @@
             <button class="btn primary wide" type="submit">Enviar relatório</button>
           </form>
         </section>
-        <section class="panel col-7">
+        <section id="driverPanelProofs" class="panel col-7">
           <h2>Provas do atendimento</h2>
           <p class="muted small">Checklist profissional, fotos obrigatórias do veículo guinchado e assinatura do cliente final. Cloudinary guarda os arquivos; Firestore guarda a rastreabilidade.</p>
           <form id="driverProofForm" class="form-grid">
@@ -113,10 +113,11 @@
                 <button class="btn" id="clearSignatureBtn" type="button">Limpar assinatura</button>
               </div>
             </div>
+            <div id="driverProofStatus" class="wide proof-submit-status info" role="status" aria-live="polite">Pronto para enviar. O sistema mostrará aqui cada etapa: validação, upload, salvamento e erro.</div>
             <button class="btn good wide" type="submit">Salvar provas e assinatura</button>
           </form>
         </section>
-        <section class="panel col-12">
+        <section id="driverPanelMap" class="panel col-12">
           <h2>Mapa dos meus atendimentos</h2>
           <p class="muted small">O motorista visualiza somente os próprios chamados. A rota interna usa OpenStreetMap/OSRM e o botão abre navegação externa no Maps/Waze quando houver link salvo.</p>
           <div id="driverMap" class="map"></div>
@@ -128,15 +129,15 @@
   <footer class="signature-footer">Powered by thIAguinho Soluções Digitais</footer>
   <div id="toast" class="toast"></div>
 
-  <script src="js/config.firebase.js?v=jm-v19-1-mobile-gps-real"></script>
+  <script src="js/config.firebase.js?v=jm-v19-3-provas-minimizacao-definitiva"></script>
   <script src="https://www.gstatic.com/firebasejs/10.12.5/firebase-app-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/10.12.5/firebase-auth-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/10.12.5/firebase-firestore-compat.js"></script>
-  <script src="js/utils.js?v=jm-v19-1-mobile-gps-real"></script>
-  <script src="js/firebase.js?v=jm-v19-1-mobile-gps-real"></script>
-  <script src="js/google-maps.js?v=jm-v19-1-mobile-gps-real"></script>
-  <script src="js/mapa.js?v=jm-v19-1-mobile-gps-real"></script>
-  <script src="js/motorista.js?v=jm-v19-1-mobile-gps-real"></script>
+  <script src="js/utils.js?v=jm-v19-3-provas-minimizacao-definitiva"></script>
+  <script src="js/firebase.js?v=jm-v19-3-provas-minimizacao-definitiva"></script>
+  <script src="js/google-maps.js?v=jm-v19-3-provas-minimizacao-definitiva"></script>
+  <script src="js/mapa.js?v=jm-v19-3-provas-minimizacao-definitiva"></script>
+  <script src="js/motorista.js?v=jm-v19-3-provas-minimizacao-definitiva"></script>
 </body>
 </html>
 

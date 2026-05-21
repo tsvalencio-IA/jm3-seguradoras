@@ -10,7 +10,7 @@
   const { auth, secondaryAuth, db, ts, arrayUnion, emailIsAdmin } = window.JM.firebase;
   const cfg = window.JM_CONFIG || {};
   const SYSTEM_SIGNATURE = "Powered by thIAguinho Soluções Digitais";
-  const LOGIN_FLOW_VERSION = "jm-v19-1-mobile-gps-real";
+  const LOGIN_FLOW_VERSION = "jm-v19-3-provas-minimizacao-definitiva";
   let trackerTimer = null;
   let trackerBusy = false;
 

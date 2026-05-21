@@ -3,7 +3,7 @@
 ## Correções principais
 
 - Corrigida a acentuação quebrada/encoding nos arquivos principais.
-- Padronizada a versão de cache/PWA para `jm-v19-1-mobile-gps-real`.
+- Padronizada a versão de cache/PWA para `jm-v19-3-provas-minimizacao-definitiva`.
 - Refeito o comportamento mobile: bottom navigation, topbar fixa, cards e tabelas adaptadas, mapa com altura controlada, botões grandes e sem estouro lateral.
 - Substituída a minimização global frágil por minimização segura, sem mover o conteúdo dos painéis e sem quebrar mapa/formulários.
 - O GPS do celular do motorista agora salva no chamado e também tenta atualizar o veículo/frota, permitindo aparecer no mapa do gestor como `GPS celular motorista`.
@@ -33,8 +33,8 @@ Para o GPS do celular também atualizar o documento do veículo em `vehicles/{id
 1. Subir os arquivos no GitHub.
 2. Publicar `firestore.rules` no Firebase Console.
 3. Abrir:
-   - `jm.html?v=jm-v19-1-mobile-gps-real`
-   - `motorista.html?v=jm-v19-1-mobile-gps-real`
+   - `jm.html?v=jm-v19-3-provas-minimizacao-definitiva`
+   - `motorista.html?v=jm-v19-3-provas-minimizacao-definitiva`
 4. No motorista, selecionar chamado e clicar em `Ativar GPS para a central`.
 5. No gestor, abrir `Central Operacional` ou `Mapa / Tracker`.
 6. Conferir se o veículo aparece como `GPS celular motorista` quando não houver tracker.
