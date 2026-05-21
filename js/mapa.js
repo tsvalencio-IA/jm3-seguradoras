@@ -1,7 +1,7 @@
 (function () {
   "use strict";
 
-  const { esc, callRoutePoints, routeKm, geoJsonToLatLngs } = window.JM.utils;
+  const { esc, callRoutePoints, routeKm, geoJsonToLatLngs, pointFrom } = window.JM.utils;
 
   function loadLeaflet() {
     return new Promise((resolve, reject) => {
@@ -113,14 +113,44 @@
     return window.JM.utils.statusKey(call) === filter || operationalStatus(call && call.status) === filter;
   }
 
+  function vehicleLivePoint(vehicle) {
+    return pointFrom(vehicle && (vehicle.location || vehicle.mobileLocation || vehicle.driverPhoneLocation || vehicle.phoneLocation));
+  }
+
+  function enrichVehiclesWithPhoneGps(vehicles, calls) {
+    const out = Object.assign({}, vehicles || {});
+    Object.values(calls || {}).forEach((call) => {
+      if (!call || call.deletedAt || !call.vehicleId) return;
+      const phonePoint = pointFrom(call.driverPhoneLocation || call.mobileLocation || call.driverLocation);
+      if (!phonePoint) return;
+      const current = out[call.vehicleId] || { id: call.vehicleId, placa: call.vehiclePlate || call.vehicleId };
+      const hasTrackerPoint = pointFrom(current.location) && String(current.gpsSource || current.locationSource || current.trackerStatus || "").toLowerCase().includes("tracker");
+      out[call.vehicleId] = Object.assign({}, current, {
+        location: hasTrackerPoint ? current.location : phonePoint,
+        mobileLocation: phonePoint,
+        driverPhoneLocation: phonePoint,
+        gpsSource: hasTrackerPoint ? (current.gpsSource || "tracker") : "driver_phone",
+        trackerStatus: hasTrackerPoint ? (current.trackerStatus || "Tracker RAFA") : "GPS celular motorista",
+        lastTrackerAt: current.lastTrackerAt || call.phoneLocationUpdatedAt || phonePoint.capturedAt,
+        lastPhoneGpsAt: call.phoneLocationUpdatedAt || phonePoint.capturedAt,
+        activeCallId: call.id,
+        activeDriverId: call.driverId || current.activeDriverId || ""
+      });
+    });
+    return out;
+  }
+
   async function renderFleetMap(containerId, vehicles, calls, options) {
     options = options || {};
     const container = document.getElementById(containerId);
     if (!container) return;
-    const located = Object.values(vehicles || {}).filter((v) => !v.deletedAt && v.location && Number.isFinite(Number(v.location.lat)) && Number.isFinite(Number(v.location.lng)));
+    vehicles = enrichVehiclesWithPhoneGps(vehicles, calls);
+    const located = Object.values(vehicles || {}).filter((v) => !v.deletedAt && vehicleLivePoint(v));
     const routedCalls = Object.values(calls || {}).filter((c) => matchesFilter(c, options)).map((call) => {
       const forcedVehicle = options.selectedCallId && call.id === options.selectedCallId && options.selectedVehicleId ? vehicles && vehicles[options.selectedVehicleId] : null;
-      const vehicle = forcedVehicle || vehicles && vehicles[call.vehicleId];
+      const baseVehicle = forcedVehicle || vehicles && vehicles[call.vehicleId];
+      const live = vehicleLivePoint(baseVehicle);
+      const vehicle = live ? Object.assign({}, baseVehicle, { location: live }) : baseVehicle;
       return { call, vehicle, pts: callRoutePoints(call, vehicle) };
     }).filter((row) => row.pts.length);
     if (!located.length && !routedCalls.length) {
@@ -145,11 +175,14 @@
       }).addTo(map);
       const bounds = [];
       located.forEach((vehicle) => {
-        const p = [Number(vehicle.location.lat), Number(vehicle.location.lng)];
+        const livePoint = vehicleLivePoint(vehicle);
+        if (!livePoint) return;
+        const p = [Number(livePoint.lat), Number(livePoint.lng)];
         bounds.push(p);
         const isSelected = options.selectedVehicleId && vehicle.id === options.selectedVehicleId;
+        const source = String(vehicle.gpsSource || "").includes("driver_phone") ? "GPS celular" : (vehicle.trackerStatus || "GPS/Tracker");
         const marker = L.marker(p, { zIndexOffset: isSelected ? 900 : 0 }).addTo(map)
-          .bindPopup(`<b>${esc(vehicle.placa || "")}</b><br>${esc(vehicle.apelido || vehicle.tipo || "")}<br>${esc(vehicle.trackerStatus || "")}`);
+          .bindPopup(`<b>${esc(vehicle.placa || vehicle.id || "")}</b><br>${esc(vehicle.apelido || vehicle.tipo || "")}<br>${esc(source)}<br>${vehicle.lastPhoneGpsAt ? "Celular: " + esc(vehicle.lastPhoneGpsAt) : ""}`);
         if (isSelected) {
           L.circleMarker(p, { radius: 17, weight: 4, color: "#22c55e", fillOpacity: 0.08 }).addTo(map);
           marker.openPopup();
@@ -160,7 +193,7 @@
         pts.forEach((p) => {
           const latlng = [p.point.lat, p.point.lng];
           bounds.push(latlng);
-          const kindColor = p.kind === "origin" ? "#22c55e" : p.kind === "destination" ? "#ef4444" : p.kind === "vehicle" ? "#38bdf8" : "#f59e0b";
+          const kindColor = p.kind === "origin" ? "#22c55e" : p.kind === "destination" ? "#ef4444" : p.kind === "driver_phone" ? "#a78bfa" : p.kind === "vehicle" ? "#38bdf8" : "#f59e0b";
           L.circleMarker(latlng, { radius: callSelected ? 9 : 6, weight: callSelected ? 4 : 2, color: kindColor, fillOpacity: callSelected ? 0.45 : 0.25 }).addTo(map).bindPopup(`<b>${esc(p.label || "Ponto")}</b><br>${esc(call.protocolo || call.cliente || "Chamado")}`);
         });
         if (pts.length >= 2) await addRouteLayer(L, map, call, pts, bounds);
@@ -175,6 +208,12 @@
     }
   }
 
+  function invalidateAll() {
+    Object.values(liveMaps).forEach((map) => {
+      try { map.invalidateSize(); } catch (_) {}
+    });
+  }
+
   window.JM = window.JM || {};
-  window.JM.mapa = { renderFleetMap };
+  window.JM.mapa = { renderFleetMap, invalidateAll };
 }());

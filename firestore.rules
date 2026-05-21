@@ -97,7 +97,15 @@ service cloud.firestore {
 
     match /vehicles/{id} {
       allow read: if isOffice() || isDriver();
-      allow create, update: if canManageFleet();
+      allow create: if canManageFleet();
+      allow update: if canManageFleet()
+        || (isDriver()
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+            'location', 'mobileLocation', 'driverPhoneLocation', 'gpsSource', 'trackerStatus',
+            'lastPhoneGpsAt', 'lastTrackerAt', 'activeCallId', 'activeDriverId', 'activeDriverName',
+            'updatedAt', 'updatedBy'
+          ])
+          && request.resource.data.activeDriverId == request.auth.uid);
       allow delete: if canManageFleet();
     }
 

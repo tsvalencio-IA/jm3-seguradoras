@@ -4,7 +4,7 @@
   const { $, esc, parseMoney, toast, statusClass, routeKm, mapsRouteUrl, statusKey, statusLabel, isFinalStatus, setupCollapsiblePanels } = window.JM.utils;
   const { auth, db, arrayUnion } = window.JM.firebase;
   const cfg = window.JM_CONFIG || {};
-  const DRIVER_FLOW_VERSION = "jm-v19-polimento-fluxo-mobile";
+  const DRIVER_FLOW_VERSION = "jm-v19-1-mobile-gps-real";
   const state = { user: null, profile: null, calls: {}, vehicles: {}, expenses: {}, settings: {} };
   const unsubscribers = [];
   let driverLocationWatchId = null;
@@ -396,9 +396,11 @@
   }
 
   async function saveDriverLocationPoint(callId, pos) {
+    const call = state.calls[callId] || {};
+    const vehicleId = call.vehicleId || call.vehicle || call.truckId || "";
     const point = {
-      lat: pos.coords.latitude,
-      lng: pos.coords.longitude,
+      lat: Number(pos.coords.latitude),
+      lng: Number(pos.coords.longitude),
       accuracy: pos.coords.accuracy || null,
       altitude: pos.coords.altitude || null,
       heading: pos.coords.heading || null,
@@ -406,16 +408,45 @@
       source: "driver_phone_geolocation",
       capturedAt: new Date().toISOString(),
       driverId: state.user.uid,
-      driverName: state.profile.nome || state.user.email
+      driverName: state.profile.nome || state.user.email,
+      callId,
+      vehicleId
     };
-    await db.collection("calls").doc(callId).set({
+
+    const callPayload = {
       driverPhoneLocation: point,
       mobileLocation: point,
       phoneLocationActive: true,
       phoneLocationUpdatedAt: point.capturedAt,
+      gpsSource: "driver_phone",
       updatedAt: point.capturedAt
-    }, { merge: true });
-    setDriverLocationStatus("Localizacao ativa: " + point.lat.toFixed(6) + ", " + point.lng.toFixed(6) + " - precisao " + Math.round(point.accuracy || 0) + "m", "ok");
+    };
+
+    await db.collection("calls").doc(callId).set(callPayload, { merge: true });
+
+    if (vehicleId) {
+      try {
+        await db.collection("vehicles").doc(vehicleId).set({
+          location: point,
+          mobileLocation: point,
+          driverPhoneLocation: point,
+          gpsSource: "driver_phone",
+          trackerStatus: "GPS celular motorista",
+          lastPhoneGpsAt: point.capturedAt,
+          lastTrackerAt: point.capturedAt,
+          activeCallId: callId,
+          activeDriverId: state.user.uid,
+          activeDriverName: state.profile.nome || state.user.email,
+          updatedAt: point.capturedAt,
+          updatedBy: state.user.uid
+        }, { merge: true });
+      } catch (err) {
+        console.warn("GPS do celular foi salvo no chamado, mas o veículo recusou atualização. Publique o firestore.rules da versão V19.1.", err);
+      }
+    }
+
+    const vehicleLabel = vehicleId ? " · veículo atualizado" : " · chamado sem veículo vinculado";
+    setDriverLocationStatus("Localização ativa: " + point.lat.toFixed(6) + ", " + point.lng.toFixed(6) + " · precisão " + Math.round(point.accuracy || 0) + "m" + vehicleLabel, vehicleId ? "ok" : "warn");
     return point;
   }
 
@@ -440,29 +471,6 @@
     driverLocationWatchId = navigator.geolocation.watchPosition(async (pos) => {
       try {
         await saveDriverLocationPoint(callId, pos);
-        return;
-      } catch (err) {
-        setDriverLocationStatus("Falha ao enviar localizacao: " + (err && err.message || "permissao negada"), "danger");
-        return;
-      }
-      const point = {
-        lat: pos.coords.latitude,
-        lng: pos.coords.longitude,
-        accuracy: pos.coords.accuracy || null,
-        source: "driver_phone_geolocation",
-        capturedAt: new Date().toISOString(),
-        driverId: state.user.uid,
-        driverName: state.profile.nome || state.user.email
-      };
-      try {
-        await db.collection("calls").doc(callId).set({
-          driverPhoneLocation: point,
-          mobileLocation: point,
-          phoneLocationActive: true,
-          phoneLocationUpdatedAt: point.capturedAt,
-          updatedAt: point.capturedAt
-        }, { merge: true });
-        setDriverLocationStatus("Localização ativa: " + point.lat.toFixed(6) + ", " + point.lng.toFixed(6) + " · precisão " + Math.round(point.accuracy || 0) + "m", "ok");
       } catch (err) {
         setDriverLocationStatus("Falha ao enviar localização: " + (err && err.message || "permissão negada"), "danger");
       }
@@ -479,28 +487,19 @@
     if (key === "finalizado" && !["completo", "revisado"].includes(call.proofStatus || proofStatusFor(call))) {
       return toast("Antes de finalizar, salve checklist, fotos obrigatórias e assinatura/aceite do cliente em Provas do atendimento.", "danger");
     }
-    const now = new Date().toISOString();
-    const updates = {
+    await db.collection("calls").doc(id).update({
       status: label,
       statusKey: key,
-      closedAt: key === "finalizado" ? now : call.closedAt || "",
-      finalizedAt: key === "finalizado" ? now : call.finalizedAt || "",
+      closedAt: key === "finalizado" ? new Date().toISOString() : call.closedAt || "",
       closedBy: key === "finalizado" ? state.user.uid : call.closedBy || "",
       closedByEmail: key === "finalizado" ? state.user.email : call.closedByEmail || "",
       locked: key === "finalizado" ? true : call.locked || false,
       phoneLocationActive: key === "finalizado" ? false : call.phoneLocationActive || false,
-      updatedAt: now,
-      timeline: arrayUnion({ at: now, by: state.profile.nome || state.user.email, text: "Motorista alterou status para " + label })
-    };
-    if (key === "finalizado" && Number(call.valor || 0) > 0) {
-      updates.billingStatus = "a_faturar";
-      updates.financePending = true;
-      updates.finalizedByDriver = true;
-      updates.finalizedAwaitingBilling = true;
-    }
-    await db.collection("calls").doc(id).update(updates);
+      updatedAt: new Date().toISOString(),
+      timeline: arrayUnion({ at: new Date().toISOString(), by: state.profile.nome || state.user.email, text: "Motorista alterou status para " + label })
+    });
     if (key === "finalizado") stopDriverPhoneLocation();
-    toast(key === "finalizado" && Number(call.valor || 0) > 0 ? "Chamado finalizado e enviado para a fila de faturamento da central." : "Chamado atualizado.", "ok");
+    toast("Chamado atualizado.", "ok");
   }
 
   async function uploadToCloudinaryAsset(file, options) {

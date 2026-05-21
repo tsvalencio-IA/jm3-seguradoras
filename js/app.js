@@ -4,13 +4,13 @@
   const {
     $, $all, esc, money, parseMoney, dateTime, todayInput, plateKey, isValidPlate,
     uidSafe, coords, pointFrom, routeKm, mapsRouteUrl, normalizeUrl, toast, statusClass,
-    statusKey, statusLabel, isFinalStatus: utilIsFinalStatus, maskPhone, maskCpf, maskCnpj, validateCpf, validateCnpj, digits, phoneWhatsappUrl,
+    statusKey, statusLabel, isFinalStatus: utilIsFinalStatus, maskPhone, phoneWhatsappUrl,
     geometryToFirestore, setupCollapsiblePanels
   } = window.JM.utils;
   const { auth, secondaryAuth, db, ts, arrayUnion, emailIsAdmin } = window.JM.firebase;
   const cfg = window.JM_CONFIG || {};
   const SYSTEM_SIGNATURE = "Powered by thIAguinho Soluções Digitais";
-  const LOGIN_FLOW_VERSION = "jm-v19-polimento-fluxo-mobile";
+  const LOGIN_FLOW_VERSION = "jm-v19-1-mobile-gps-real";
   let trackerTimer = null;
   let trackerBusy = false;
 
@@ -358,43 +358,6 @@
     return out;
   }
 
-  function isCallReceivableTx(t) {
-    return !!t && (t.module === "call_receivable" || t.sourceType === "call_receivable" || String(t.id || "") === sourceDocId("call_receivable", t.callId));
-  }
-
-  function isCallPaymentReceiptTx(t) {
-    return !!t && (t.module === "payment_receipt" || t.sourceType === "payment_receipt");
-  }
-
-  function receivedValueFromReceipt(t) {
-    if (!t || !statusMeansReceived(t.status)) return 0;
-    return Number(t.receivedAmount != null ? t.receivedAmount : t.paidAmount != null ? t.paidAmount : t.amount || 0);
-  }
-
-  function revenueValueForTotals(t, rows) {
-    if (!t || t.type !== "entrada") return 0;
-    if (isCallPaymentReceiptTx(t) && t.callId && rows.some((r) => r.id !== t.id && r.callId === t.callId && isCallReceivableTx(r))) return 0;
-    return Number(t.amount || 0);
-  }
-
-  async function syncReceivableTransaction(callId, summary) {
-    if (!callId || !summary) return;
-    const txId = sourceDocId("call_receivable", callId);
-    const ref = db.collection("transactions").doc(txId);
-    const snap = await ref.get();
-    if (!snap.exists || snap.data().deletedAt) return;
-    const balance = Math.max(0, Number(summary.balanceAmount || 0));
-    const paid = Number(summary.paidAmount || 0);
-    const status = Number(summary.expectedAmount || 0) <= 0 ? "Sem valor" : paid <= 0 ? "A receber" : balance > 0.009 ? "Parcial" : "Recebido";
-    await ref.set({
-      paidAmount: paid,
-      balanceAmount: balance,
-      status,
-      updatedAt: new Date().toISOString(),
-      updatedBy: state.user && state.user.uid || "system"
-    }, { merge: true });
-  }
-
   async function recalculateCallFinancials(callId) {
     if (!callId || !canManageFinance()) return;
     const call = await getDocData("calls", callId, state.calls);
@@ -407,16 +370,14 @@
     });
     const entradas = rows.filter((t) => t.type === "entrada");
     const saidas = rows.filter((t) => t.type === "saida");
-    const receivables = entradas.filter(isCallReceivableTx);
-    const receipts = entradas.filter(isCallPaymentReceiptTx);
-    const expectedFromReceivable = receivables.reduce((sum, t) => sum + Number(t.amount || 0), 0);
+    const expectedFromReceivable = entradas
+      .filter((t) => t.module === "call_receivable" || t.sourceType === "call_receivable" || t.sourceType === "call")
+      .reduce((sum, t) => sum + Number(t.amount || 0), 0);
     const expectedAmount = Math.max(Number(call.valor || 0), expectedFromReceivable);
-    const paidFromReceipts = receipts.reduce((sum, t) => sum + receivedValueFromReceipt(t), 0);
-    const paidFromReceivable = receivables.reduce((sum, t) => sum + Number(t.paidAmount || t.receivedAmount || 0), 0);
-    const paidFromLegacy = entradas
-      .filter((t) => !isCallReceivableTx(t) && !isCallPaymentReceiptTx(t) && statusMeansReceived(t.status))
-      .reduce((sum, t) => sum + Number(t.paidAmount || t.receivedAmount || t.amount || 0), 0);
-    const paidAmount = paidFromReceipts > 0 ? paidFromReceipts + paidFromLegacy : Math.max(paidFromReceivable, paidFromLegacy);
+    const paidAmount = entradas.reduce((sum, t) => {
+      if (statusMeansReceived(t.status)) return sum + Number(t.paidAmount || t.receivedAmount || t.amount || 0);
+      return sum + Number(t.paidAmount || t.receivedAmount || 0);
+    }, 0);
     const costAmount = saidas.reduce((sum, t) => sum + Number(t.amount || 0), 0);
     const balanceAmount = Math.max(0, expectedAmount - paidAmount);
     let billingStatus = call.billingStatus || "aberto";
@@ -425,36 +386,23 @@
     } else if (isFinalStatus(call.statusKey || call.status)) {
       billingStatus = "sem_valor";
     }
-    const activeReceivableId = receivables[0] && receivables[0].id || "";
-    const summary = {
-      expectedAmount,
-      paidAmount,
-      costAmount,
-      balanceAmount,
-      profitAmount: expectedAmount - costAmount,
-      marginPercent: expectedAmount > 0 ? Math.round(((expectedAmount - costAmount) / expectedAmount) * 10000) / 100 : 0,
-      transactionsCount: rows.length,
-      receiptsCount: receipts.length,
-      recalculatedAt: new Date().toISOString()
-    };
-    const callUpdate = {
-      financialSummary: summary,
+    await db.collection("calls").doc(callId).set({
+      financialSummary: {
+        expectedAmount,
+        paidAmount,
+        costAmount,
+        balanceAmount,
+        profitAmount: expectedAmount - costAmount,
+        marginPercent: expectedAmount > 0 ? Math.round(((expectedAmount - costAmount) / expectedAmount) * 10000) / 100 : 0,
+        transactionsCount: rows.length,
+        recalculatedAt: new Date().toISOString()
+      },
       billingStatus,
       paidAmount,
       balanceAmount,
       costAmount,
       updatedFinancialAt: new Date().toISOString()
-    };
-    if (activeReceivableId) {
-      callUpdate.financeCreated = true;
-      callUpdate.receivableTransactionId = activeReceivableId;
-    } else if (call.receivableTransactionId && !rows.some((t) => t.id === call.receivableTransactionId)) {
-      callUpdate.financeCreated = false;
-      callUpdate.receivableTransactionId = "";
-      if (isFinalStatus(call.statusKey || call.status) && expectedAmount > 0) callUpdate.billingStatus = "a_faturar";
-    }
-    await db.collection("calls").doc(callId).set(callUpdate, { merge: true });
-    await syncReceivableTransaction(callId, summary);
+    }, { merge: true });
   }
 
   async function upsertCallReceivable(callId, options) {
@@ -467,7 +415,7 @@
     const now = new Date().toISOString();
     const txId = sourceDocId("call_receivable", callId);
     const expectedAmount = Math.max(Number(call.valor || 0), Number(options && options.expectedAmount || options && options.amount || 0));
-    const paidAmount = Number(options && options.paidAmount || call.paidAmount || 0);
+    const paidAmount = statusMeansReceived(options && options.status) ? Number(options && options.paidAmount != null ? options.paidAmount : options && options.amount || expectedAmount) : Number(options && options.paidAmount || 0);
     const balanceAmount = Math.max(0, expectedAmount - paidAmount);
     const status = options && options.status || (paidAmount <= 0 ? "A receber" : balanceAmount > 0.009 ? "Parcial" : "Recebido");
     const base = enrichFinancialPayloadFromCall({
@@ -498,49 +446,10 @@
       paidAmount,
       balanceAmount,
       updatedFinancialAt: now,
-      timeline: arrayUnion({ at: now, by: personName(), text: "Conta a receber do chamado atualizada automaticamente" })
+      timeline: arrayUnion({ at: now, by: personName(), text: "Financeiro do chamado atualizado automaticamente" })
     }, { merge: true });
     await recalculateCallFinancials(callId);
     return txId;
-  }
-
-  async function createOrUpdatePaymentReceipt(callId, payload, editingId) {
-    if (!callId || !payload || !canManageFinance()) return null;
-    const call = await getDocData("calls", callId, state.calls);
-    if (!call) return null;
-    const amount = Number(payload.amount || 0);
-    if (amount <= 0) {
-      toast("Informe o valor recebido.", "danger");
-      return null;
-    }
-    await upsertCallReceivable(callId, { status: "A receber", amount: Math.max(Number(call.valor || 0), amount), dueDate: payload.dueDate, category: payload.category || "Receita de chamado" });
-    const now = new Date().toISOString();
-    const current = editingId && state.transactions[editingId] || null;
-    const receiptId = current && isCallPaymentReceiptTx(current) ? editingId : db.collection("transactions").doc().id;
-    const receipt = enrichFinancialPayloadFromCall(Object.assign({}, payload, {
-      module: "payment_receipt",
-      sourceType: "payment_receipt",
-      sourceId: receiptId,
-      receiptId,
-      type: "entrada",
-      status: "Recebido",
-      paidAmount: amount,
-      receivedAmount: amount,
-      balanceAmount: 0,
-      callId,
-      updatedAt: now,
-      updatedBy: state.user.uid
-    }), call);
-    const ref = db.collection("transactions").doc(receiptId);
-    const snap = await ref.get();
-    await ref.set(Object.assign(snap.exists ? {} : { createdAt: now, createdBy: state.user.uid }, receipt), { merge: true });
-    await db.collection("calls").doc(callId).set({
-      lastPaymentTransactionId: receiptId,
-      lastPaymentAt: now,
-      timeline: arrayUnion({ at: now, by: personName(), text: `Recebimento registrado: ${money(amount)}` })
-    }, { merge: true });
-    await recalculateCallFinancials(callId);
-    return receiptId;
   }
 
   async function upsertTransactionFromExpense(expenseId, expenseData) {
@@ -883,11 +792,11 @@
       await geocodeAddress("destination");
       destination = addressFromInputs("destination");
     }
-    const located = Object.values(state.vehicles || {}).filter((v) => pointFrom(v.location));
-    if (!located.length) return toast("Nenhum veículo tem posição de tracker. Sincronize o tracker no superadmin primeiro.", "danger");
+    const located = Object.values(state.vehicles || {}).map(vehicleWithLiveGps).filter((v) => vehicleLivePoint(v));
+    if (!located.length) return toast("Nenhum veículo tem posição de tracker/celular. Sincronize o tracker ou ative o GPS do motorista no painel do motorista.", "danger");
     $("smartRouteBox").innerHTML = "Calculando melhor veículo e tempo de rota...";
     try {
-      const rankings = await gm.rankVehicles(state.vehicles, finalOrigin.coords, destination && destination.coords, activeMapSettings());
+      const rankings = await gm.rankVehicles(Object.fromEntries(Object.values(state.vehicles || {}).map(vehicleWithLiveGps).map((v) => [v.id, v])), finalOrigin.coords, destination && destination.coords, activeMapSettings());
       state.smartRoute = { origin: finalOrigin, destination, rankings, calculatedAt: new Date().toISOString() };
       const best = bestSmartRoute();
       if (best && !$("callVehicle").value) $("callVehicle").value = best.vehicle.id;
@@ -1085,11 +994,6 @@
       const el = $(id);
       if (el) el.oninput = () => { el.value = maskPhone(el.value); };
     });
-    const doc = $("customerDocument");
-    if (doc) doc.oninput = () => {
-      const only = digits(doc.value);
-      doc.value = only.length > 11 ? maskCnpj(only) : maskCpf(only);
-    };
   }
 
   function reportSignature() {
@@ -1403,6 +1307,35 @@
     setOptionsPreservingValue("expenseCall", `<option value="">Sem chamado</option>` + myCalls.map((c) => `<option value="${esc(c.id)}">${esc(c.protocolo || c.cliente)}</option>`).join(""));
   }
 
+  function vehicleLivePoint(vehicle) {
+    return pointFrom(vehicle && (vehicle.location || vehicle.mobileLocation || vehicle.driverPhoneLocation || vehicle.phoneLocation));
+  }
+
+  function phoneGpsForVehicle(vehicleId) {
+    if (!vehicleId) return null;
+    const rows = visibleRows(state.calls).filter((call) => call.vehicleId === vehicleId && call.phoneLocationActive);
+    rows.sort((a, b) => String(b.phoneLocationUpdatedAt || b.updatedAt || "").localeCompare(String(a.phoneLocationUpdatedAt || a.updatedAt || "")));
+    const call = rows[0];
+    const p = call && pointFrom(call.driverPhoneLocation || call.mobileLocation || call.driverLocation);
+    return p ? { point: p, call } : null;
+  }
+
+  function vehicleWithLiveGps(vehicle) {
+    const phone = phoneGpsForVehicle(vehicle && vehicle.id);
+    if (phone && !vehicleLivePoint(vehicle)) {
+      return Object.assign({}, vehicle, {
+        location: phone.point,
+        mobileLocation: phone.point,
+        gpsSource: "driver_phone",
+        trackerStatus: "GPS celular motorista",
+        lastPhoneGpsAt: phone.call.phoneLocationUpdatedAt || phone.point.capturedAt,
+        lastTrackerAt: phone.call.phoneLocationUpdatedAt || phone.point.capturedAt,
+        activeCallId: phone.call.id
+      });
+    }
+    return vehicle;
+  }
+
   function renderDashboard() {
     const calls = visibleRows(state.calls);
     const active = calls.filter((c) => !isFinalStatus(c.status));
@@ -1420,7 +1353,7 @@
       return d.getMonth() === now.getMonth() && d.getFullYear() === now.getFullYear();
     }).reduce((sum, t) => sum + Number(t.amount || 0), 0);
     const pendingExpenses = expenses.filter((e) => e.status === "pendente").reduce((sum, e) => sum + Number(e.amount || 0), 0);
-    const online = visibleRows(state.vehicles).filter((v) => v.location && v.lastTrackerAt).length;
+    const online = visibleRows(state.vehicles).map(vehicleWithLiveGps).filter((v) => vehicleLivePoint(v) && (v.lastTrackerAt || v.lastPhoneGpsAt)).length;
     $("kpiActiveCalls").textContent = active.length;
     $("kpiRevenue").textContent = canSeeSensitiveFinance() ? money(revenue) : "Restrito";
     $("kpiExpenses").textContent = canSeeSensitiveFinance() ? money(pendingExpenses) : "Restrito";
@@ -1467,7 +1400,7 @@
     const waiting = active.filter((c) => currentStatusKey(c) === "aguardando_despacho");
     const inRoute = active.filter((c) => ["despachado", "motorista_a_caminho", "motorista_no_local", "veiculo_carregado", "em_transporte"].includes(currentStatusKey(c)));
     const insurance = active.filter((c) => String(c.source || c.origemComercial || "").toLowerCase().includes("segur") || String(c.insurance || "").trim());
-    const onlineVehicles = visibleRows(state.vehicles).filter((v) => v.location && v.lastTrackerAt);
+    const onlineVehicles = visibleRows(state.vehicles).map(vehicleWithLiveGps).filter((v) => vehicleLivePoint(v) && (v.lastTrackerAt || v.lastPhoneGpsAt));
     const overdue = active.filter((c) => slaInfo(c).overdue);
     const visibleValue = canSeeSensitiveFinance() ? money(active.reduce((s, c) => s + Number(c.valor || 0), 0)) : "Restrito";
     const insuranceOptions = Array.from(new Set(active.map((c) => c.insurance || c.source || "").filter(Boolean))).sort();
@@ -1516,17 +1449,20 @@
       </div>`;
     }).join("") : `<p class="muted">Nenhum chamado no filtro selecionado.</p>`;
 
-    const vehicles = visibleRows(state.vehicles).sort((a, b) => String(a.placa || a.id || "").localeCompare(String(b.placa || b.id || "")));
+    const vehicles = visibleRows(state.vehicles).map(vehicleWithLiveGps).sort((a, b) => String(a.placa || a.id || "").localeCompare(String(b.placa || b.id || "")));
     if (!state.selectedVehicleId && selectedCall && selectedCall.vehicleId) state.selectedVehicleId = selectedCall.vehicleId;
     $("opsVehiclesList").innerHTML = vehicles.length ? vehicles.map((v) => {
       const selected = v.id === state.selectedVehicleId ? " selected" : "";
-      const age = minutesSince(v.lastTrackerAt || v.updatedAt);
-      const online = v.location && age != null && age <= 10;
-      const stale = v.location && age != null && age > 10;
+      const livePoint = vehicleLivePoint(v);
+      const gpsAt = v.lastPhoneGpsAt || v.lastTrackerAt || v.updatedAt;
+      const age = minutesSince(gpsAt);
+      const online = livePoint && age != null && age <= 10;
+      const stale = livePoint && age != null && age > 10;
+      const gpsLabel = String(v.gpsSource || "").includes("driver_phone") ? "GPS celular" : "Tracker RAFA";
       return `<div class="ops-card vehicle${selected}" onclick="JM.app.selectOperationalVehicle('${esc(v.id)}')">
         <div class="actions" style="justify-content:space-between"><b>${esc(v.placa || v.id)}</b><span class="badge ${online ? 'ok' : stale ? 'warn' : 'muted'}">${online ? 'online' : stale ? 'atrasado' : 'sem GPS'}</span></div>
-        <div class="muted small">${esc(v.apelido || v.tipo || "Veículo")}</div>
-        <div class="small">${v.location ? `Lat ${esc(v.location.lat)} · Lng ${esc(v.location.lng)}` : 'Sem posição do tracker'}</div>
+        <div class="muted small">${esc(v.apelido || v.tipo || "Veículo")} · ${livePoint ? esc(gpsLabel) : 'sem sinal'}</div>
+        <div class="small">${livePoint ? `Lat ${esc(livePoint.lat)} · Lng ${esc(livePoint.lng)}` : 'Sem posição do tracker/celular'}</div>
         <div class="muted small">${age == null ? 'sem atualização' : 'última posição há ' + age + ' min'}</div>
       </div>`;
     }).join("") : `<p class="muted">Nenhum veículo cadastrado.</p>`;
@@ -2020,10 +1956,6 @@ Rota: ${url}`;
       updatedBy: state.user.uid
     };
     if (!payload.name) return toast("Informe o nome do cliente/seguradora.", "danger");
-    const docDigits = digits(payload.document);
-    if (docDigits.length === 11 && !validateCpf(docDigits)) return toast("CPF inválido. Confira os números antes de salvar.", "danger");
-    if (docDigits.length === 14 && !validateCnpj(docDigits)) return toast("CNPJ inválido. Confira os números antes de salvar.", "danger");
-    if (payload.document && ![11, 14].includes(docDigits.length)) return toast("Documento inválido. Informe CPF com 11 dígitos ou CNPJ com 14 dígitos.", "danger");
     if (state.editingCustomerId) {
       await db.collection("customers").doc(state.editingCustomerId).set(payload, { merge: true });
       toast("Cliente atualizado.", "ok");
@@ -2483,7 +2415,7 @@ Rota: ${url}`;
       return;
     }
     const rows = visibleRows(state.transactions).sort((a, b) => String(b.createdAt || b.date || "").localeCompare(String(a.createdAt || a.date || "")));
-    const entradas = rows.filter((t) => t.type === "entrada" && t.module !== "payments_shadow").reduce((s, t) => s + revenueValueForTotals(t, rows), 0);
+    const entradas = rows.filter((t) => t.type === "entrada" && t.module !== "payments_shadow").reduce((s, t) => s + Number(t.amount || 0), 0);
     const saidas = rows.filter((t) => t.type === "saida").reduce((s, t) => s + Number(t.amount || 0), 0);
     const toBill = visibleRows(state.calls).filter((c) => Number(c.valor || 0) > 0 && (isFinalStatus(c.statusKey || c.status) || /faturar|receber/i.test(String(c.billingStatus || ""))) && !c.receivableTransactionId);
     const billingQueue = toBill.length ? `<div class="workflow-box warn"><b>Chamados finalizados/a faturar sem financeiro oficial</b><div class="table-wrap"><table><thead><tr><th>Chamado</th><th>Cliente/seguradora</th><th>Veículo</th><th>Valor</th><th>Ação</th></tr></thead><tbody>${toBill.map((c) => {
@@ -2514,13 +2446,12 @@ Rota: ${url}`;
 
   $("financeForm").onsubmit = async (e) => {
     e.preventDefault();
-    const submit = e.submitter || document.querySelector("#financeForm button[type='submit']");
     if (!canManageFinance()) return toast("Somente gestor/dono ou financeiro pode lançar.", "danger");
     const callId = $("finCall") ? $("finCall").value : "";
     const call = callId ? await getDocData("calls", callId, state.calls) : null;
     let payload = {
       type: $("finType").value,
-      date: $("finDate").value || todayInput(),
+      date: $("finDate").value,
       description: $("finDesc").value.trim(),
       amount: parseMoney($("finAmount").value),
       status: $("finStatus").value,
@@ -2535,35 +2466,17 @@ Rota: ${url}`;
       updatedBy: state.user.uid
     };
     payload = enrichFinancialPayloadFromCall(payload, call);
-    if (payload.amount <= 0) return toast("Informe um valor financeiro válido.", "danger");
-    setButtonBusy(submit, true, "Salvando...");
-    try {
-      let savedId = state.editingTransactionId;
-      const current = savedId && state.transactions[savedId] || null;
-      if (payload.callId && payload.type === "entrada" && (!current || isCallReceivableTx(current))) {
-        savedId = await upsertCallReceivable(payload.callId, {
-          date: payload.date,
-          dueDate: payload.dueDate || payload.date,
-          description: payload.description || undefined,
-          amount: payload.amount,
-          paidAmount: statusMeansReceived(payload.status) ? payload.amount : 0,
-          status: payload.status,
-          category: payload.category || "Receita de chamado"
-        });
-        toast("Conta a receber do chamado salva sem criar lançamento duplicado.", "ok");
-      } else if (savedId) {
-        await db.collection("transactions").doc(savedId).set(payload, { merge: true });
-        toast("Lançamento atualizado e vínculos recalculados.", "ok");
-      } else {
-        const ref = await db.collection("transactions").add(Object.assign({ createdAt: new Date().toISOString(), createdBy: state.user.uid }, payload));
-        savedId = ref.id;
-        toast("Lançamento salvo e vinculado automaticamente.", "ok");
-      }
-      if (payload.callId) await recalculateCallFinancials(payload.callId);
-      resetFinanceForm();
-    } finally {
-      setButtonBusy(submit, false);
+    let savedId = state.editingTransactionId;
+    if (savedId) {
+      await db.collection("transactions").doc(savedId).set(payload, { merge: true });
+      toast("Lançamento atualizado e vínculos recalculados.", "ok");
+    } else {
+      const ref = await db.collection("transactions").add(Object.assign({ createdAt: new Date().toISOString(), createdBy: state.user.uid }, payload));
+      savedId = ref.id;
+      toast("Lançamento salvo e vinculado automaticamente.", "ok");
     }
+    if (payload.callId) await recalculateCallFinancials(payload.callId);
+    resetFinanceForm();
   };
 
   function renderPayments() {
@@ -2623,7 +2536,6 @@ Rota: ${url}`;
 
   $("paymentForm") && ($("paymentForm").onsubmit = async (e) => {
     e.preventDefault();
-    const submit = e.submitter || document.querySelector("#paymentForm button[type='submit']");
     if (!canManageFinance()) return toast("Somente gestor/dono ou financeiro pode gerir pagamentos.", "danger");
     const customer = $("payCustomer").value ? state.customers[$("payCustomer").value] || null : null;
     const callId = $("payCall").value;
@@ -2648,43 +2560,32 @@ Rota: ${url}`;
     };
     payload = enrichFinancialPayloadFromCall(payload, call);
     if (!payload.billingParty && !payload.customerId && !payload.callId) return toast("Selecione ou informe quem vai pagar/receber.", "danger");
-    if (payload.amount <= 0) return toast("Informe um valor de pagamento válido.", "danger");
-    setButtonBusy(submit, true, "Salvando...");
-    try {
-      const current = state.editingPaymentId && state.transactions[state.editingPaymentId] || null;
-      if (payload.callId && payload.type === "entrada") {
-        if (current && isCallReceivableTx(current) && !statusMeansReceived(payload.status)) {
-          await upsertCallReceivable(payload.callId, {
-            date: payload.date,
-            dueDate: payload.dueDate,
-            description: payload.description || undefined,
-            amount: payload.amount,
-            paidAmount: 0,
-            status: payload.status || "A receber",
-            paymentMethod: payload.paymentMethod,
-            invoiceNumber: payload.invoiceNumber,
-            category: payload.category || "Receita de chamado"
-          });
-          toast("Cobrança do chamado atualizada.", "ok");
-        } else {
-          const receiptId = await createOrUpdatePaymentReceipt(payload.callId, payload, state.editingPaymentId);
-          state.editingPaymentId = receiptId || state.editingPaymentId;
-          toast("Recebimento registrado como baixa do chamado, mantendo histórico de parcelas.", "ok");
-        }
-      } else if (state.editingPaymentId) {
-        await db.collection("transactions").doc(state.editingPaymentId).set(payload, { merge: true });
-        if (payload.callId) await recalculateCallFinancials(payload.callId);
-        toast("Pagamento atualizado e vínculos recalculados.", "ok");
-      } else {
-        const ref = await db.collection("transactions").add(Object.assign({ createdAt: new Date().toISOString(), createdBy: state.user.uid }, payload));
-        if (payload.callId) await recalculateCallFinancials(payload.callId);
-        state.editingPaymentId = ref.id;
-        toast("Pagamento cadastrado e vinculado automaticamente.", "ok");
-      }
-      resetPaymentForm();
-    } finally {
-      setButtonBusy(submit, false);
+
+    if (payload.callId && payload.type === "entrada") {
+      const txId = await upsertCallReceivable(payload.callId, {
+        date: payload.date,
+        dueDate: payload.dueDate,
+        description: payload.description || undefined,
+        amount: payload.amount,
+        paidAmount: statusMeansReceived(payload.status) ? payload.amount : 0,
+        status: payload.status,
+        paymentMethod: payload.paymentMethod,
+        invoiceNumber: payload.invoiceNumber,
+        category: payload.category || "Receita de chamado"
+      });
+      state.editingPaymentId = txId || state.editingPaymentId;
+      toast("Recebimento salvo no financeiro e no chamado, sem lançar duas vezes.", "ok");
+    } else if (state.editingPaymentId) {
+      await db.collection("transactions").doc(state.editingPaymentId).set(payload, { merge: true });
+      if (payload.callId) await recalculateCallFinancials(payload.callId);
+      toast("Pagamento atualizado e vínculos recalculados.", "ok");
+    } else {
+      const ref = await db.collection("transactions").add(Object.assign({ createdAt: new Date().toISOString(), createdBy: state.user.uid }, payload));
+      if (payload.callId) await recalculateCallFinancials(payload.callId);
+      state.editingPaymentId = ref.id;
+      toast("Pagamento cadastrado e vinculado automaticamente.", "ok");
     }
+    resetPaymentForm();
   });
 
   async function generateCallReceivable(id) {
@@ -2762,7 +2663,7 @@ Rota: ${url}`;
   function refreshMaps() {
     const active = document.querySelector(".view.active");
     window.JM_MAP_SETTINGS = activeMapSettings();
-    const vehicles = Object.fromEntries(visibleRows(state.vehicles).map((v) => [v.id, v]));
+    const vehicles = Object.fromEntries(visibleRows(state.vehicles).map(vehicleWithLiveGps).map((v) => [v.id, v]));
     const calls = Object.fromEntries(visibleRows(state.calls).map((c) => [c.id, c]));
     if (!active) return;
     if (active.id === "view-dashboard") window.JM.mapa.renderFleetMap("dashboardMap", vehicles, calls);
