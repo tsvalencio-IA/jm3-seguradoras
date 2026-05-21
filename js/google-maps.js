@@ -5,6 +5,7 @@
   const DEFAULT_SPEED_KMH = 48;
   const DEFAULT_OSRM_URL = "https://router.project-osrm.org/route/v1/driving";
   const routeCache = new Map();
+  let googleMapsPromise = null;
 
   function toLatLng(value) {
     const p = pointFrom(value);
@@ -99,10 +100,120 @@
     return true;
   }
 
-  async function initAutocomplete(inputId, onSelect) {
+  function googleApiKey(settings) {
+    return String(settings && (settings.apiKey || settings.mapsKey || settings.googleMapsKey) || "").trim();
+  }
+
+  function isGoogleConfigured(settings) {
+    return !!googleApiKey(settings);
+  }
+
+  function googlePlaceUrl(value) {
+    const point = toLatLng(value);
+    if (point) return "https://www.google.com/maps/search/?api=1&query=" + encodeURIComponent(point.lat + "," + point.lng);
+    const text = cleanText(value);
+    return text ? "https://www.google.com/maps/search/?api=1&query=" + encodeURIComponent(text) : "";
+  }
+
+  function loadGoogleMaps(settings) {
+    const key = googleApiKey(settings);
+    if (!key) return Promise.resolve(false);
+    if (window.google && window.google.maps) return Promise.resolve(true);
+    if (googleMapsPromise) return googleMapsPromise;
+    googleMapsPromise = new Promise((resolve, reject) => {
+      const callbackName = "__jmGoogleMapsReady";
+      window[callbackName] = () => resolve(true);
+      const script = document.createElement("script");
+      script.async = true;
+      script.defer = true;
+      script.onerror = () => reject(new Error("Não consegui carregar o Google Maps. Verifique a chave salva no superadmin."));
+      script.src = "https://maps.googleapis.com/maps/api/js?key=" + encodeURIComponent(key) + "&libraries=places,geometry,marker&v=weekly&callback=" + callbackName;
+      document.head.appendChild(script);
+    }).catch((err) => {
+      googleMapsPromise = null;
+      throw err;
+    });
+    return googleMapsPromise;
+  }
+
+  function geocodeWithGoogle(text, settings) {
+    return loadGoogleMaps(settings).then((ok) => new Promise((resolve, reject) => {
+      if (!ok || !window.google || !google.maps.Geocoder) return reject(new Error("Google Maps não está configurado."));
+      const geocoder = new google.maps.Geocoder();
+      geocoder.geocode({ address: text, region: settings && settings.region || "BR" }, (results, status) => {
+        if (status === "OK" && results && results[0] && results[0].geometry && results[0].geometry.location) {
+          const loc = results[0].geometry.location;
+          return resolve({
+            label: results[0].formatted_address || text,
+            coords: { lat: loc.lat(), lng: loc.lng() },
+            source: "google_geocoding",
+            provider: "google_maps",
+            raw: text,
+            externalUrl: googlePlaceUrl(results[0].formatted_address || text),
+            placeId: results[0].place_id || "",
+            resolvedAt: new Date().toISOString()
+          });
+        }
+        reject(new Error("O Google Maps não localizou este endereço. Confira bairro, cidade e número."));
+      });
+    }));
+  }
+
+  async function geocodeWithNominatim(text, settings) {
+    const url = new URL("https://nominatim.openstreetmap.org/search");
+    url.searchParams.set("format", "jsonv2");
+    url.searchParams.set("limit", "1");
+    url.searchParams.set("addressdetails", "1");
+    url.searchParams.set("q", text);
+    if (settings && settings.country) url.searchParams.set("countrycodes", String(settings.country).toLowerCase());
+    const response = await fetch(url.toString(), { headers: { "Accept": "application/json" }, cache: "no-store" });
+    if (!response.ok) throw new Error("Busca gratuita de endereço indisponível agora. Cole um link do Maps ou coordenadas.");
+    const rows = await response.json();
+    const hit = rows && rows[0];
+    if (!hit) throw new Error("Não encontrei esse endereço na busca gratuita. Digite cidade/UF ou cole o link do Google Maps.");
+    const point = coords(hit.lat, hit.lon);
+    if (!point) throw new Error("O endereço foi encontrado, mas veio sem coordenadas utilizáveis.");
+    return {
+      label: hit.display_name || text,
+      coords: point,
+      source: "nominatim_openstreetmap",
+      provider: "openstreetmap",
+      raw: text,
+      externalUrl: googlePlaceUrl(hit.display_name || text),
+      resolvedAt: new Date().toISOString()
+    };
+  }
+
+  async function initAutocomplete(inputId, onSelect, settings) {
     const input = document.getElementById(inputId);
     if (!input) return null;
     input.setAttribute("autocomplete", "off");
+    if (isGoogleConfigured(settings || {})) {
+      try {
+        await loadGoogleMaps(settings || {});
+        if (window.google && google.maps.places) {
+          const country = String(settings && (settings.country || settings.region) || "BR").toLowerCase().slice(0, 2);
+          const autocomplete = new google.maps.places.Autocomplete(input, { componentRestrictions: { country } });
+          autocomplete.addListener("place_changed", () => {
+            const place = autocomplete.getPlace();
+            if (place && place.geometry && place.geometry.location && typeof onSelect === "function") {
+              onSelect({
+                label: place.formatted_address || place.name || input.value,
+                coords: { lat: place.geometry.location.lat(), lng: place.geometry.location.lng() },
+                source: "google_places_autocomplete",
+                provider: "google_maps",
+                raw: input.value,
+                externalUrl: googlePlaceUrl(place.formatted_address || input.value),
+                placeId: place.place_id || "",
+                resolvedAt: new Date().toISOString()
+              });
+            }
+          });
+        }
+      } catch (err) {
+        console.warn("Autocomplete Google indisponível, mantendo busca manual gratuita:", err);
+      }
+    }
     input.addEventListener("change", () => {
       const parsed = parseLocationInput(input.value);
       if (parsed && parsed.coords && typeof onSelect === "function") onSelect(parsed);
@@ -110,12 +221,14 @@
     return null;
   }
 
-  async function geocode(text) {
+  async function geocode(text, settings) {
     const parsed = parseLocationInput(text);
-    if (!parsed || !parsed.coords) {
-      throw new Error("Cole um link do mapa que mostre latitude/longitude ou informe no formato -20.851076,-49.398946. Links curtos do Google nem sempre trazem coordenadas visíveis para leitura automática.");
+    if (parsed && parsed.coords) return parsed;
+    if (!parsed || !parsed.raw) throw new Error("Informe endereço, link do mapa ou coordenadas.");
+    if (isGoogleConfigured(settings || {})) {
+      try { return await geocodeWithGoogle(parsed.raw, settings || {}); } catch (err) { console.warn(err); }
     }
-    return parsed;
+    return geocodeWithNominatim(parsed.raw, settings || {});
   }
 
   function estimateRoute(a, b, label) {
@@ -283,8 +396,13 @@
     extractCoordinatePair,
     extractCoordinatePairs,
     isConfigured,
+    isGoogleConfigured,
+    loadGoogleMaps,
     initAutocomplete,
     geocode,
+    geocodeWithGoogle,
+    geocodeWithNominatim,
+    googlePlaceUrl,
     estimateRoute,
     routeThroughPoints,
     osrmRoute,

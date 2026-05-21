@@ -5,12 +5,12 @@
     $, $all, esc, money, parseMoney, dateTime, todayInput, plateKey, isValidPlate,
     uidSafe, coords, pointFrom, routeKm, mapsRouteUrl, normalizeUrl, toast, statusClass,
     statusKey, statusLabel, isFinalStatus: utilIsFinalStatus, maskPhone, phoneWhatsappUrl,
-    geometryToFirestore
+    geometryToFirestore, setupCollapsiblePanels
   } = window.JM.utils;
   const { auth, secondaryAuth, db, ts, arrayUnion, emailIsAdmin } = window.JM.firebase;
   const cfg = window.JM_CONFIG || {};
   const SYSTEM_SIGNATURE = "Powered by thIAguinho Soluções Digitais";
-  const LOGIN_FLOW_VERSION = "jm-v17-1-custos-frota-combustivel";
+  const LOGIN_FLOW_VERSION = "jm-v18-provas-assinatura-seguradoras";
   let trackerTimer = null;
   let trackerBusy = false;
 
@@ -30,6 +30,7 @@
     smartRoute: null,
     selectedCallId: null,
     selectedVehicleId: null,
+    selectedDossierCallId: null,
     operationFilter: "ativos",
     operationPriorityFilter: "",
     operationInsuranceFilter: "",
@@ -850,6 +851,7 @@
       dashboard: "Dashboard",
       operacao: "Central Operacional",
       chamados: "Chamados",
+      finalizados: "Finalizados",
       clientes: "Clientes / seguradoras",
       integracoes: "Integrações",
       mapa: "Mapa / Tracker",
@@ -1156,6 +1158,7 @@
 
   function applyRoleVisibility() {
     const visibility = {
+      finalizados: isOffice(),
       clientes: isOffice(),
       integracoes: canOperateCalls(),
       financeiro: canManageFinance(),
@@ -1229,6 +1232,8 @@
     renderDashboard();
     renderOperations();
     renderCalls();
+    renderFinalizedCalls();
+    renderCallDossier();
     renderCustomers();
     renderIntegrationInbox();
     renderVehicles();
@@ -1279,6 +1284,12 @@
     const now = new Date();
     const transactions = visibleRows(state.transactions);
     const expenses = visibleRows(state.expenses);
+    const finalized = calls.filter((c) => isFinalStatus(c.status));
+    const toBill = finalized.filter((c) => ["a_faturar", "aguardando_provas", "aberto"].includes(String(c.billingStatus || "aberto")));
+    const overdueSla = active.filter((c) => slaInfo(c).overdue);
+    const incompleteProofs = active.concat(toBill).filter((c) => !callProofComplete(c));
+    const receivables = transactions.filter((t) => t.type === "entrada" && ["A receber", "A faturar", "Pendente"].includes(String(t.status || ""))).reduce((sum, t) => sum + Number(t.amount || 0), 0);
+    const payables = transactions.filter((t) => t.type === "saida" && ["A pagar", "Pendente"].includes(String(t.status || ""))).reduce((sum, t) => sum + Number(t.amount || 0), 0);
     const revenue = transactions.filter((t) => t.type === "entrada").filter((t) => {
       const d = new Date(t.date || t.createdAt || 0);
       return d.getMonth() === now.getMonth() && d.getFullYear() === now.getFullYear();
@@ -1289,6 +1300,15 @@
     $("kpiRevenue").textContent = canSeeSensitiveFinance() ? money(revenue) : "Restrito";
     $("kpiExpenses").textContent = canSeeSensitiveFinance() ? money(pendingExpenses) : "Restrito";
     $("kpiOnline").textContent = online;
+    if ($("dashboardOpsKpis")) {
+      $("dashboardOpsKpis").innerHTML = `
+        <div class="card kpi"><span>Finalizados</span><strong>${finalized.length}</strong></div>
+        <div class="card kpi"><span>A faturar / provas</span><strong>${toBill.length}</strong></div>
+        <div class="card kpi"><span>SLA vencido</span><strong>${overdueSla.length}</strong></div>
+        <div class="card kpi"><span>Provas pendentes</span><strong>${incompleteProofs.length}</strong></div>
+        <div class="card kpi"><span>A receber</span><strong>${canSeeSensitiveFinance() ? money(receivables) : "Restrito"}</strong></div>
+        <div class="card kpi"><span>A pagar</span><strong>${canSeeSensitiveFinance() ? money(payables) : "Restrito"}</strong></div>`;
+    }
     const events = calls.flatMap((c) => (c.timeline || []).map((t) => ({ ...t, call: c }))).sort((a, b) => String(b.at || "").localeCompare(String(a.at || ""))).slice(0, 10);
     $("timelineBox").innerHTML = events.length ? events.map((e) => `<div class="timeline-item"><b>${esc(e.call.protocolo || e.call.cliente || "Chamado")}</b><br><span>${esc(e.text || "")}</span><br><small>${dateTime(e.at)}</small></div>`).join("") : `<p class="muted">Sem eventos ainda.</p>`;
   }
@@ -1451,7 +1471,7 @@ Rota: ${url}`;
   }
 
   function renderCalls() {
-    const rows = visibleRows(state.calls).sort((a, b) => String(b.createdAt || "").localeCompare(String(a.createdAt || "")));
+    const rows = visibleRows(state.calls).filter((c) => !isFinalStatus(c)).sort((a, b) => String(b.createdAt || "").localeCompare(String(a.createdAt || "")));
     if (!rows.length) return $("callsTable").innerHTML = `<p class="muted">Nenhum chamado registrado.</p>`;
     $("callsTable").innerHTML = `<table><thead><tr><th>Protocolo</th><th>Cliente</th><th>Origem/Destino</th><th>Veículo</th><th>Status</th><th>Ações</th></tr></thead><tbody>` + rows.map((c) => {
       const vehicle = state.vehicles[c.vehicleId] || {};
@@ -1471,9 +1491,32 @@ Rota: ${url}`;
         <td><span class="small">${esc(c.originLabel || c.origem && c.origem.label || "-")}</span><br><span class="muted small">→ ${esc(c.destLabel || c.destino && c.destino.label || "-")}</span><br><b>${esc(metric)}</b>${routeBadge}${url ? `<br><a class="info small" target="_blank" href="${esc(url)}">Abrir rota no Maps</a>` : ""}</td>
         <td>${esc(vehicle.placa || "-")}<br><span class="muted small">${esc(driver.nome || driver.email || "Sem motorista")}</span></td>
         <td><span class="badge ${statusClass(c)}">${esc(operationalStatus(c))}</span>${valueHtml}<br><span class="badge ${sla.className}">${esc(sla.label)}</span><br>${proofStatusBadge(c)}</td>
-        <td class="row-actions"><button class="btn good" onclick="JM.app.setCallStatus('${esc(c.id)}','despachado')">Despachar</button><button class="btn primary" onclick="JM.app.setCallStatus('${esc(c.id)}','motorista_a_caminho')">A caminho</button><button class="btn" onclick="JM.app.setCallStatus('${esc(c.id)}','finalizado')">Finalizar</button>${viewProofActions}${proofActions}${adminActions}</td>
+        <td class="row-actions"><button class="btn" onclick="JM.app.selectCallDossier('${esc(c.id)}')">Painel</button><button class="btn good" onclick="JM.app.setCallStatus('${esc(c.id)}','despachado')">Despachar</button><button class="btn primary" onclick="JM.app.setCallStatus('${esc(c.id)}','motorista_a_caminho')">A caminho</button><button class="btn" onclick="JM.app.setCallStatus('${esc(c.id)}','finalizado')">Finalizar</button>${viewProofActions}${proofActions}${adminActions}</td>
       </tr>`;
     }).join("") + `</tbody></table>`;
+  }
+
+  function selectCallDossier(id) {
+    state.selectedDossierCallId = id;
+    renderCallDossier();
+    const box = $("callDossierBox");
+    if (box) box.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
+
+  function renderFinalizedCalls() {
+    if (!$("finalizedCallsTable")) return;
+    const rows = visibleRows(state.calls).filter((c) => isFinalStatus(c)).sort((a, b) => String(b.closedAt || b.finalizedAt || b.updatedAt || "").localeCompare(String(a.closedAt || a.finalizedAt || a.updatedAt || "")));
+    $("finalizedCallsTable").innerHTML = rows.length ? `<table><thead><tr><th>Chamado</th><th>Cliente/seguradora</th><th>Fechamento</th><th>Provas</th><th>Ações</th></tr></thead><tbody>` + rows.map((c) => {
+      const driver = state.users[c.driverId] || {};
+      const vehicle = state.vehicles[c.vehicleId] || {};
+      return `<tr>
+        <td><b>${esc(c.protocolo || c.id)}</b><br><span class="muted small">${esc(vehicle.placa || c.vehicleId || "sem veículo")}</span></td>
+        <td>${esc(c.cliente || "")}<br><span class="muted small">${esc(c.insurance || c.source || "")}${c.insuranceProtocol ? " · Prot. " + esc(c.insuranceProtocol) : ""}</span></td>
+        <td><span class="badge ok">${esc(operationalStatus(c))}</span><br><span class="muted small">${dateTime(c.closedAt || c.finalizedAt || c.updatedAt)} · ${esc(driver.nome || driver.email || "motorista")}</span><br><span class="badge ${c.locked !== false ? "warn" : "info"}">${c.locked !== false ? "travado" : "reaberto"}</span></td>
+        <td>${proofStatusBadge(c)}<br><span class="muted small">Cobrança: ${esc(c.billingStatus || "aberto")}</span></td>
+        <td class="row-actions"><button class="btn" onclick="JM.app.selectCallDossier('${esc(c.id)}')">Painel</button><button class="btn" onclick="JM.app.viewCallProofs('${esc(c.id)}')">Checklist/fotos</button>${canOwnCompany() || hasRole(["gerente"]) ? `<button class="btn warn" onclick="JM.app.reopenCall('${esc(c.id)}')">Reabrir</button>` : ""}</td>
+      </tr>`;
+    }).join("") + `</tbody></table>` : `<p class="muted">Nenhum chamado finalizado ainda.</p>`;
   }
 
   $("callForm").onsubmit = async (e) => {
@@ -1589,6 +1632,9 @@ Rota: ${url}`;
     if (!call) return;
     const key = statusKey(status);
     const label = statusLabel(key);
+    if (isFinalStatus(call) && key !== "finalizado") {
+      return toast("Chamado finalizado fica travado. Use Reabrir com autorização e motivo auditado.", "danger");
+    }
     const updates = {
       status: label,
       statusKey: key,
@@ -1599,12 +1645,23 @@ Rota: ${url}`;
     if (key === "finalizado" && !callProofComplete(call)) {
       updates.billingStatus = "aguardando_provas";
       updates.financePending = true;
+      updates.closedAt = new Date().toISOString();
+      updates.closedBy = state.user.uid;
+      updates.closedByEmail = state.user.email;
+      updates.locked = true;
       await db.collection("calls").doc(id).update(updates);
       return toast("Chamado marcado como finalizado operacional, mas não ficou pronto para faturar: faltam checklist, fotos obrigatórias ou assinatura/aceite.", "warn");
     }
     if (key === "finalizado" && Number(call.valor || 0) > 0) {
       updates.billingStatus = canManageFinance() ? "a_receber" : "a_faturar";
       updates.financePending = !canManageFinance();
+    }
+    if (key === "finalizado") {
+      updates.closedAt = new Date().toISOString();
+      updates.closedBy = state.user.uid;
+      updates.closedByEmail = state.user.email;
+      updates.locked = true;
+      updates.finalizedAt = updates.closedAt;
     }
     await db.collection("calls").doc(id).update(updates);
     if (key === "finalizado" && Number(call.valor || 0) > 0 && canManageFinance()) {
@@ -1617,10 +1674,45 @@ Rota: ${url}`;
     }
   }
 
+  async function reopenCall(id) {
+    if (!canOwnCompany() && !hasRole(["gerente"])) return toast("Somente gestor/dono ou gerente pode autorizar reabertura.", "danger");
+    const call = state.calls[id];
+    if (!call) return toast("Chamado não encontrado.", "danger");
+    if (!isFinalStatus(call)) return toast("Este chamado não está finalizado.", "warn");
+    const reason = window.prompt("Motivo obrigatório para reabrir o chamado " + (call.protocolo || id) + ":", "Correção autorizada pela gestão");
+    if (reason === null) return;
+    if (!String(reason || "").trim()) return toast("Informe um motivo para reabrir com auditoria.", "danger");
+    await db.collection("calls").doc(id).set({
+      status: "Aguardando despacho",
+      statusKey: "aguardando_despacho",
+      locked: false,
+      reopenedAt: new Date().toISOString(),
+      reopenedBy: state.user.uid,
+      reopenedByEmail: state.user.email,
+      reopenReason: reason.trim(),
+      billingStatus: call.billingStatus === "recebido" ? "recebido" : "aberto",
+      timeline: arrayUnion({ at: new Date().toISOString(), by: personName(), text: "Chamado reaberto com autorização: " + reason.trim() }),
+      updatedAt: new Date().toISOString()
+    }, { merge: true });
+    await db.collection("auditLogs").add({
+      collection: "calls",
+      docId: id,
+      action: "reopen_finalized_call",
+      reason: reason.trim(),
+      oldData: call,
+      userId: state.user.uid,
+      userEmail: state.user.email,
+      role: state.profile && state.profile.role || "",
+      createdAt: new Date().toISOString()
+    }).catch(() => {});
+    toast("Chamado reaberto com autorização e auditoria.", "ok");
+  }
+
   function editCall(id) {
     if (!canOwnCompany() && !hasRole(["gerente"])) return toast("Somente gestor/dono ou gerente pode editar chamados.", "danger");
     const call = state.calls[id];
     if (!call) return toast("Chamado não encontrado.", "danger");
+    if (isFinalStatus(call) && call.locked !== false) return toast("Chamado finalizado está travado. Reabra com autorização antes de editar.", "danger");
     state.editingCallId = id;
     showView("chamados");
     setValue("callCustomerId", call.customerId || "");
@@ -1725,6 +1817,45 @@ Rota: ${url}`;
     if (!win) return toast("O navegador bloqueou a janela de provas.", "danger");
     win.document.write(`<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><title>Provas ${esc(call.protocolo || id)}</title><style>body{font-family:Arial,sans-serif;padding:18px;color:#111827} h1{margin-bottom:4px} .muted{color:#64748b}</style></head><body><h1>Provas do atendimento ${esc(call.protocolo || id)}</h1><p class="muted">${esc(call.cliente || "")} · ${esc(call.insurance || "")} · ${esc(call.customerPlate || "")}</p><h2>Checklist</h2><ul>${checklistHtml}</ul><p>${esc(checklist.notes || "")}</p><h2>Assinatura</h2>${sigHtml}<h2>Fotos</h2>${photoHtml}</body></html>`);
     win.document.close();
+  }
+
+  function renderCallDossier() {
+    const box = $("callDossierBox");
+    if (!box) return;
+    const call = state.calls[state.selectedDossierCallId] || visibleRows(state.calls).find((c) => !isFinalStatus(c)) || null;
+    if (!call) {
+      box.innerHTML = `<p class="muted">Selecione um chamado para ver checklist, fotos, assinatura, rota, financeiro e auditoria operacional.</p>`;
+      return;
+    }
+    state.selectedDossierCallId = call.id;
+    const vehicle = state.vehicles[call.vehicleId] || {};
+    const driver = state.users[call.driverId] || {};
+    const checklist = call.proofChecklist || {};
+    const photos = proofPhotos(call);
+    const sig = call.customerSignature || {};
+    const sigUrl = sig.signatureUrl || sig.cloudinaryUrl || "";
+    const txs = visibleRows(state.transactions).filter((t) => t.callId === call.id);
+    const entradas = txs.filter((t) => t.type === "entrada").reduce((s, t) => s + Number(t.amount || 0), 0);
+    const saidas = txs.filter((t) => t.type === "saida").reduce((s, t) => s + Number(t.amount || 0), 0);
+    const checklistHtml = REQUIRED_PROOF_STAGES.map((stage) => {
+      const row = checklist[stage] || {};
+      return `<div class="dossier-row"><b>${esc(stage)}</b><span class="badge ${row.status && row.status !== "pendente" ? "ok" : "warn"}">${esc(row.status || "pendente")}</span></div>`;
+    }).join("");
+    const photosHtml = photos.length ? photos.map((p) => `<a class="proof-thumb" target="_blank" href="${esc(p.cloudinaryUrl)}"><img src="${esc(p.cloudinaryUrl)}" alt="${esc(p.label || p.type || "foto")}"><span>${esc(p.label || p.type || "foto")}</span></a>`).join("") : `<p class="muted small">Sem fotos salvas.</p>`;
+    const timeline = (call.timeline || []).slice().reverse().slice(0, 8).map((t) => `<div class="timeline-item"><b>${esc(t.by || t.user || "Sistema")}</b><br>${esc(t.text || t.acao || "")}<br><small>${dateTime(t.at || t.dt)}</small></div>`).join("") || `<p class="muted small">Sem auditoria operacional.</p>`;
+    box.innerHTML = `
+      <div class="dossier-head">
+        <div><h3>${esc(call.protocolo || call.id)} · ${esc(call.cliente || "")}</h3><p class="muted small">${esc(call.insurance || call.source || "Particular")} ${call.insuranceProtocol ? "· Prot. " + esc(call.insuranceProtocol) : ""} · ${esc(call.customerPlate || "")}</p></div>
+        <div class="actions"><span class="badge ${statusClass(call)}">${esc(operationalStatus(call))}</span>${proofStatusBadge(call)}<button class="btn" onclick="JM.app.viewCallProofs('${esc(call.id)}')">Abrir provas</button>${isFinalStatus(call) && (canOwnCompany() || hasRole(["gerente"])) ? `<button class="btn warn" onclick="JM.app.reopenCall('${esc(call.id)}')">Reabrir com autorização</button>` : ""}</div>
+      </div>
+      <div class="dossier-grid">
+        <section><h3>Operação</h3><p class="small"><b>Origem:</b> ${esc(call.originLabel || call.origem && call.origem.label || "-")}<br><b>Destino:</b> ${esc(call.destLabel || call.destino && call.destino.label || "-")}<br><b>Veículo:</b> ${esc(vehicle.placa || call.vehicleId || "-")}<br><b>Motorista:</b> ${esc(driver.nome || driver.email || "-")}</p></section>
+        <section><h3>Checklist</h3>${checklistHtml}<p class="muted small">${esc(checklist.notes || "")}</p></section>
+        <section><h3>Fotos</h3><div class="proof-thumbs">${photosHtml}</div></section>
+        <section><h3>Assinatura</h3>${sigUrl ? `<p class="small"><b>${esc(sig.name || "Cliente")}</b><br>${esc(sig.document || "")}<br>${dateTime(sig.signedAt)}</p><img class="signature-preview" src="${esc(sigUrl)}" alt="Assinatura">` : `<p class="muted small">Sem assinatura.</p>`}</section>
+        <section><h3>Financeiro</h3><p class="small">Cobrança: <b>${esc(call.billingStatus || "aberto")}</b><br>Valor previsto: <b>${canSeeSensitiveFinance() ? money(call.valor || 0) : "Restrito"}</b><br>Resultado lançado: <b>${canSeeSensitiveFinance() ? money(entradas - saidas) : "Restrito"}</b></p></section>
+        <section><h3>Linha do tempo</h3>${timeline}</section>
+      </div>`;
   }
 
   function renderCustomers() {
@@ -2508,6 +2639,7 @@ Rota: ${url}`;
     bindInputMasks();
     renderSmartRouteBox();
     initializeAddressTools();
+    if (typeof setupCollapsiblePanels === "function") setupCollapsiblePanels(document, { collapseOnMobile: true, openFirst: 2 });
     if ($("finDate")) $("finDate").value = todayInput();
     if ($("payDate")) $("payDate").value = todayInput();
     if ($("maintenanceDate")) $("maintenanceDate").value = todayInput();
@@ -2527,6 +2659,8 @@ Rota: ${url}`;
     deleteCall,
     viewCallProofs,
     reviewCallProofs,
+    selectCallDossier,
+    reopenCall,
     editTeamMember,
     deleteTeamMember,
     editTransaction,
