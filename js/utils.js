@@ -331,14 +331,17 @@
     if (!scope) return;
     const cfg = Object.assign({ collapseOnMobile: true, openFirst: 2 }, options || {});
     const mobile = window.matchMedia && window.matchMedia("(max-width: 760px)").matches;
-    const panels = $all(".panel", scope);
+    const panels = Array.from(scope.querySelectorAll(".panel"));
+
+    function directChild(parent, selector) {
+      return Array.from(parent.children || []).find((el) => el.matches && el.matches(selector)) || null;
+    }
 
     panels.forEach((panel, index) => {
-      if (!panel || panel.dataset.noCollapse === "true" || panel.classList.contains("no-collapse")) return;
-      if (panel.closest(".login")) return;
+      if (!panel || panel.dataset.noCollapse === "true" || panel.classList.contains("no-collapse") || panel.closest(".login")) return;
 
-      let head = panel.querySelector(":scope > .panel-collapse-head");
-      let title = head ? head.querySelector("h2,h3") : panel.querySelector(":scope > h2, :scope > h3");
+      let head = directChild(panel, ".panel-collapse-head");
+      let title = head ? (head.querySelector("h2,h3") || null) : directChild(panel, "h2,h3");
       if (!title) return;
 
       if (!head) {
@@ -346,28 +349,33 @@
         head.className = "panel-collapse-head";
         panel.insertBefore(head, panel.firstChild);
       }
-      if (title.parentElement !== head) head.appendChild(title);
+      if (title.parentElement !== head) head.insertBefore(title, head.firstChild);
 
-      let button = head.querySelector(":scope > .panel-collapse-toggle");
+      let button = Array.from(head.children || []).find((el) => el.classList && el.classList.contains("panel-collapse-toggle"));
       if (!button) {
-        button = panel.querySelector(":scope > .panel-collapse-toggle") || document.createElement("button");
+        button = directChild(panel, ".panel-collapse-toggle") || document.createElement("button");
         button.type = "button";
         button.className = "btn panel-collapse-toggle";
         head.appendChild(button);
+      } else if (button.parentElement !== head) {
+        head.appendChild(button);
       }
 
-      let body = panel.querySelector(":scope > .panel-collapse-body");
+      let body = directChild(panel, ".panel-collapse-body");
       if (!body) {
         body = document.createElement("div");
         body.className = "panel-collapse-body";
-        const move = Array.from(panel.childNodes).filter((node) => node !== head && node !== body);
-        move.forEach((node) => body.appendChild(node));
+        Array.from(panel.childNodes).forEach((node) => {
+          if (node !== head && node !== body) body.appendChild(node);
+        });
         panel.appendChild(body);
       } else {
-        Array.from(panel.childNodes).filter((node) => node !== head && node !== body).forEach((node) => body.appendChild(node));
+        Array.from(panel.childNodes).forEach((node) => {
+          if (node !== head && node !== body) body.appendChild(node);
+        });
       }
 
-      const rawTitle = title.textContent.trim() || "painel";
+      const rawTitle = (title.textContent || "painel").trim() || "painel";
       const keyBase = panel.id || rawTitle.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || String(index);
       const storageKey = "jm-panel-collapsed:" + location.pathname + ":" + keyBase;
       const isMapPanel = !!body.querySelector(".map,.ops-map,#map,#driverMap");
@@ -384,7 +392,7 @@
           if (window.JM && window.JM.mapa && typeof window.JM.mapa.invalidateAll === "function") {
             try { window.JM.mapa.invalidateAll(); } catch (_) {}
           }
-        }, 120);
+        }, 160);
       }
 
       function setCollapsed(collapsed, persist) {
@@ -392,7 +400,8 @@
         panel.classList.toggle("is-collapsed", isCollapsed);
         panel.classList.toggle("collapsed", isCollapsed);
         body.hidden = isCollapsed;
-        body.style.display = isCollapsed ? "none" : "";
+        body.style.setProperty("display", isCollapsed ? "none" : "block", "important");
+        if (!isCollapsed) body.style.removeProperty("display");
         body.setAttribute("aria-hidden", String(isCollapsed));
         button.textContent = isCollapsed ? "Maximizar" : "Minimizar";
         button.setAttribute("aria-expanded", String(!isCollapsed));

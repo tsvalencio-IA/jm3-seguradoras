@@ -4,10 +4,15 @@
   const { $, esc, parseMoney, toast, statusClass, routeKm, mapsRouteUrl, statusKey, statusLabel, isFinalStatus, setupCollapsiblePanels } = window.JM.utils;
   const { auth, db, arrayUnion } = window.JM.firebase;
   const cfg = window.JM_CONFIG || {};
-  const DRIVER_FLOW_VERSION = "jm-v19-3-provas-minimizacao-definitiva";
+  const DRIVER_FLOW_VERSION = "jm-v19-4-provas-gps-render-estavel";
   const state = { user: null, profile: null, calls: {}, vehicles: {}, expenses: {}, settings: {} };
   const unsubscribers = [];
   let driverLocationWatchId = null;
+  let lastDriverPhoneWrite = null;
+  let renderTimer = null;
+  let mapRenderTimer = null;
+  let lastSelectSignature = "";
+  let lastRenderedCallsHtml = "";
   const PROOF_STAGES = ["retirada", "carregamento", "transporte", "entrega", "finalizacao"];
   const REQUIRED_PHOTOS = [
     { key: "front", input: "proofPhotoFront", label: "Frente" },
@@ -40,6 +45,57 @@
 
   function visibleRows(rows) {
     return Object.values(rows || {}).filter((row) => row && !row.deletedAt);
+  }
+
+  function isSelectBusy(el) {
+    if (!el) return false;
+    return document.activeElement === el || el.matches && el.matches(":focus");
+  }
+
+  function optionSignature(calls, vehicles) {
+    const callPart = activeCalls().map((c) => [c.id, c.protocolo || "", c.cliente || "", c.vehicleId || "", c.statusKey || c.status || ""].join("|")).join(";");
+    const vehiclePart = visibleRows(vehicles || state.vehicles).map((v) => [v.id, v.placa || ""].join("|")).join(";");
+    return callPart + "::" + vehiclePart;
+  }
+
+  function setSelectOptionsStable(select, html, previousValue) {
+    if (!select) return;
+    if (isSelectBusy(select)) return;
+    const old = previousValue != null ? previousValue : select.value;
+    if (select.dataset.lastOptionsHtml !== html) {
+      select.innerHTML = html;
+      select.dataset.lastOptionsHtml = html;
+    }
+    if (old && Array.from(select.options).some((opt) => opt.value === old)) select.value = old;
+  }
+
+  function scheduleRender(reason) {
+    if (!state.user) return;
+    clearTimeout(renderTimer);
+    renderTimer = setTimeout(() => render(reason || "snapshot"), 180);
+  }
+
+  function scheduleMapRender() {
+    clearTimeout(mapRenderTimer);
+    mapRenderTimer = setTimeout(() => {
+      if (!document.getElementById("driverMap")) return;
+      const panel = document.getElementById("driverPanelMap");
+      if (panel && panel.classList.contains("is-collapsed")) return;
+      window.JM_MAP_SETTINGS = (window.JM_CONFIG && window.JM_CONFIG.map) || {};
+      window.JM.mapa.renderFleetMap("driverMap", state.vehicles, state.calls);
+    }, 650);
+  }
+
+  function shouldPersistDriverGps(callId, pos, force) {
+    if (force) return true;
+    const now = Date.now();
+    const lat = Number(pos && pos.coords && pos.coords.latitude);
+    const lng = Number(pos && pos.coords && pos.coords.longitude);
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) return false;
+    if (!lastDriverPhoneWrite || lastDriverPhoneWrite.callId !== callId) return true;
+    const elapsed = now - lastDriverPhoneWrite.at;
+    const moved = window.JM.utils.haversineKm({ lat, lng }, { lat: lastDriverPhoneWrite.lat, lng: lastDriverPhoneWrite.lng }) * 1000;
+    return elapsed >= 15000 || moved >= 25;
   }
 
   function proofPhotos(call) {
@@ -329,19 +385,19 @@
       const rows = {};
       snap.forEach((doc) => { rows[doc.id] = { id: doc.id, ...doc.data() }; });
       state.vehicles = rows;
-      render();
+      scheduleRender("vehicles");
     }));
     unsubscribers.push(db.collection("calls").where("driverId", "==", state.user.uid).onSnapshot((snap) => {
       const rows = {};
       snap.forEach((doc) => { rows[doc.id] = { id: doc.id, ...doc.data() }; });
       state.calls = rows;
-      render();
+      scheduleRender("calls");
     }));
     unsubscribers.push(db.collection("expenses").where("driverId", "==", state.user.uid).onSnapshot((snap) => {
       const rows = {};
       snap.forEach((doc) => { rows[doc.id] = { id: doc.id, ...doc.data() }; });
       state.expenses = rows;
-      render();
+      scheduleRender("expenses");
     }));
     unsubscribers.push(db.collection("settings").doc("integrations").onSnapshot((snap) => {
       state.settings = snap.exists ? snap.data() : {};
@@ -362,6 +418,7 @@
       $("driverAppView").classList.remove("hidden");
       $("driverUserBox").textContent = `${state.profile.nome || user.email} - ${state.profile.role || "motorista"}`;
       startListeners();
+      setTimeout(() => setupCollapsiblePanels(document, { collapseOnMobile: true, openFirst: 1 }), 80);
     } catch (err) {
       $("driverLoginError").textContent = err.message;
       await auth.signOut();
@@ -379,7 +436,7 @@
   };
 
   $("driverLogoutBtn").onclick = () => auth.signOut();
-  $("driverRefreshBtn").onclick = () => render();
+  $("driverRefreshBtn").onclick = () => render("manual");
   if ($("driverExpenseCall")) $("driverExpenseCall").onchange = syncDriverExpenseContext;
   if ($("driverStartLocationBtn")) $("driverStartLocationBtn").onclick = startDriverPhoneLocation;
   if ($("driverStopLocationBtn")) $("driverStopLocationBtn").onclick = stopDriverPhoneLocation;
@@ -388,11 +445,10 @@
     return visibleRows(state.calls).filter((c) => !isFinalStatus(c));
   }
 
-  function render() {
+  function render(reason) {
     renderCalls();
     renderExpenseSelects();
-    window.JM_MAP_SETTINGS = (window.JM_CONFIG && window.JM_CONFIG.map) || {};
-    window.JM.mapa.renderFleetMap("driverMap", state.vehicles, state.calls);
+    scheduleMapRender();
   }
 
   function renderCalls() {
@@ -426,16 +482,23 @@
   function renderExpenseSelects() {
     const currentCall = $("driverExpenseCall") && $("driverExpenseCall").value || "";
     const currentVehicle = $("driverExpenseVehicle") && $("driverExpenseVehicle").value || "";
+    const currentReportCall = $("driverReportCall") && $("driverReportCall").value || "";
+    const currentProofCall = $("driverProofCall") && $("driverProofCall").value || "";
     const currentLocationCall = $("driverLocationCall") && $("driverLocationCall").value || "";
-    const callOptions = activeCalls().map((c) => `<option value="${esc(c.id)}">${esc(c.protocolo || c.cliente)}</option>`).join("");
-    $("driverExpenseCall").innerHTML = `<option value="">Sem chamado</option>` + callOptions;
-    if (currentCall && state.calls[currentCall]) $("driverExpenseCall").value = currentCall;
-    if ($("driverReportCall")) $("driverReportCall").innerHTML = `<option value="">Selecione</option>` + callOptions;
-    if ($("driverProofCall")) $("driverProofCall").innerHTML = `<option value="">Selecione</option>` + callOptions;
-    if ($("driverLocationCall")) $("driverLocationCall").innerHTML = `<option value="">Selecione</option>` + callOptions;
-    if (currentLocationCall && state.calls[currentLocationCall] && $("driverLocationCall")) $("driverLocationCall").value = currentLocationCall;
-    $("driverExpenseVehicle").innerHTML = `<option value="">Selecione</option>` + visibleRows(state.vehicles).map((v) => `<option value="${esc(v.id)}">${esc(v.placa || v.id)}</option>`).join("");
-    if (currentVehicle && state.vehicles[currentVehicle]) $("driverExpenseVehicle").value = currentVehicle;
+    const calls = activeCalls();
+    const sig = optionSignature(calls, state.vehicles);
+    const callOptions = calls.map((c) => `<option value="${esc(c.id)}">${esc(c.protocolo || c.cliente || c.id)}</option>`).join("");
+    const callHtmlEmpty = `<option value="">Sem chamado</option>` + callOptions;
+    const callHtmlSelect = `<option value="">Selecione</option>` + callOptions;
+    const vehicleHtml = `<option value="">Selecione</option>` + visibleRows(state.vehicles).map((v) => `<option value="${esc(v.id)}">${esc(v.placa || v.id)}</option>`).join("");
+
+    setSelectOptionsStable($("driverExpenseCall"), callHtmlEmpty, currentCall);
+    setSelectOptionsStable($("driverReportCall"), callHtmlSelect, currentReportCall);
+    setSelectOptionsStable($("driverProofCall"), callHtmlSelect, currentProofCall);
+    setSelectOptionsStable($("driverLocationCall"), callHtmlSelect, currentLocationCall);
+    setSelectOptionsStable($("driverExpenseVehicle"), vehicleHtml, currentVehicle);
+
+    lastSelectSignature = sig;
     syncDriverExpenseContext();
   }
 
@@ -454,7 +517,11 @@
     setDriverLocationStatus("Localização do celular desligada.", "muted");
   }
 
-  async function saveDriverLocationPoint(callId, pos) {
+  async function saveDriverLocationPoint(callId, pos, options) {
+    options = options || {};
+    if (!shouldPersistDriverGps(callId, pos, !!options.force)) {
+      return null;
+    }
     const call = state.calls[callId] || {};
     const vehicleId = call.vehicleId || call.vehicle || call.truckId || "";
     const point = {
@@ -471,6 +538,7 @@
       callId,
       vehicleId
     };
+    lastDriverPhoneWrite = { callId, at: Date.now(), lat: point.lat, lng: point.lng };
 
     const callPayload = {
       driverPhoneLocation: point,
@@ -519,8 +587,8 @@
     setDriverLocationStatus("Solicitando permissao de localizacao do celular...", "warn");
     navigator.geolocation.getCurrentPosition(async (pos) => {
       try {
-        await saveDriverLocationPoint(callId, pos);
-        toast("Localizacao do celular enviada para a central.", "ok");
+        await saveDriverLocationPoint(callId, pos, { force: true });
+        toast("Localização do celular enviada para a central.", "ok");
       } catch (err) {
         setDriverLocationStatus("Falha ao salvar localizacao no Firestore: " + (err && err.message || "permissao negada"), "danger");
       }
@@ -723,17 +791,16 @@
 
     const requiredPhotos = requiredProofPhotosForChecklist(checklist);
     const existingPhotos = proofPhotos(call);
-    const missingPhoto = requiredPhotos.find((photo) => {
+    const selectedPhotos = REQUIRED_PHOTOS.filter((photo) => {
       const input = $(photo.input);
-      return !hasPhotoType(call, photo.key) && !(input && input.files && input.files[0]);
+      return !!(input && input.files && input.files[0]);
     });
-    if (missingPhoto) {
-      return setProofSubmitStatus("Foto obrigatória faltando: " + missingPhoto.label + ".", "danger");
-    }
+    const missingBeforeUpload = requiredPhotos.filter((photo) => !hasPhotoType(call, photo.key) && !selectedPhotos.some((p) => p.key === photo.key));
 
     const cloud = activeCloudinaryConfig();
-    if (!cloud.cloudName || !cloud.uploadPreset) {
-      return setProofSubmitStatus("Cloudinary não configurado. Entre no superadmin e salve cloudName e uploadPreset antes de enviar fotos e assinatura.", "danger");
+    const needsCloudinary = selectedPhotos.length > 0 || hasNewSignature;
+    if (needsCloudinary && (!cloud.cloudName || !cloud.uploadPreset)) {
+      return setProofSubmitStatus("Cloudinary não configurado para envio de arquivos. Entre no superadmin, salve cloudName e uploadPreset, depois atualize esta tela.", "danger");
     }
 
     submit.disabled = true;
@@ -744,12 +811,12 @@
     try {
       const gps = await getCurrentPositionSafe();
       const uploadedPhotos = [];
-      for (let i = 0; i < requiredPhotos.length; i += 1) {
-        const photo = requiredPhotos[i];
+      for (let i = 0; i < selectedPhotos.length; i += 1) {
+        const photo = selectedPhotos[i];
         const input = $(photo.input);
         const file = input && input.files && input.files[0];
         if (!file) continue;
-        setProofSubmitStatus(`Enviando ${i + 1}/${requiredPhotos.length}: ${photo.label}...`, "info", false);
+        setProofSubmitStatus(`Enviando ${i + 1}/${selectedPhotos.length}: ${photo.label}...`, "info", false);
         const asset = await uploadToCloudinaryAsset(file, { folder: "provas/" + callId });
         if (!asset || !asset.cloudinaryUrl) throw new Error("Upload sem URL retornada para " + photo.label + ".");
         uploadedPhotos.push(Object.assign({}, asset, {
@@ -784,13 +851,15 @@
       }
 
       const nextCall = Object.assign({}, call, { proofChecklist: checklist, proofPhotos: proofPhotosMerged, customerSignature });
-      const nextProofStatus = signatureMissing ? "parcial" : proofStatusFor(nextCall);
+      const missingAfterUpload = requiredPhotos.filter((photo) => !proofPhotosMerged.some((saved) => saved && saved.type === photo.key && saved.cloudinaryUrl));
+      const nextProofStatus = (!signatureMissing && missingAfterUpload.length === 0 && hasCompleteChecklist(nextCall)) ? "completo" : "parcial";
       setProofSubmitStatus("Salvando provas no chamado...", "info", false);
       await db.collection("calls").doc(callId).set({
         proofChecklist: checklist,
         proofPhotos: proofPhotosMerged,
         customerSignature,
         proofStatus: nextProofStatus,
+        proofMissingPhotos: missingAfterUpload.map((photo) => photo.label),
         proofUpdatedAt: new Date().toISOString(),
         proofUpdatedBy: state.user.uid,
         billingStatus: nextProofStatus === "completo" && call.billingStatus === "aguardando_provas" ? "a_faturar" : call.billingStatus || "aberto",
@@ -828,9 +897,10 @@
         signaturePad.dirty = false;
       }
       const savedLabels = proofPhotoLabelList(uploadedPhotos) || "nenhuma foto nova, dados atualizados";
+      const missingText = missingAfterUpload.length ? " Faltam para ficar completo: " + missingAfterUpload.map((photo) => photo.label).join(", ") + "." : "";
       const okMsg = nextProofStatus === "completo"
         ? "Provas completas e salvas. O chamado já pode ser finalizado." + auditWarning
-        : "Provas salvas parcialmente: " + savedLabels + (signatureMissing ? ". Falta coletar a assinatura para liberar finalização." : ".") + auditWarning;
+        : "Provas salvas parcialmente: " + savedLabels + "." + (signatureMissing ? " Falta coletar a assinatura para liberar finalização." : "") + missingText + auditWarning;
       setProofSubmitStatus(okMsg, auditWarning ? "warn" : "success");
     } catch (err) {
       const detail = err && (err.code || err.message) || "falha operacional";
