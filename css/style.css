@@ -398,6 +398,25 @@ td { font-size: .88rem; }
 .ops-card.vehicle.selected { border-color: rgba(34, 197, 94, .85); }
 .ops-mini-actions { margin-top: 4px; }
 .ops-mini-actions .btn { padding: 7px 8px; font-size: .68rem; }
+.signature-pad {
+  width: 100%;
+  min-height: 220px;
+  border: 1px dashed rgba(56, 189, 248, .45);
+  border-radius: var(--radius);
+  background: #081423;
+  touch-action: none;
+  display: block;
+}
+.proof-summary {
+  display: grid;
+  gap: 6px;
+  margin-top: 8px;
+  padding: 10px;
+  border: 1px solid rgba(148, 163, 184, .18);
+  border-radius: var(--radius);
+  background: rgba(255,255,255,.03);
+}
+.proof-summary a { color: var(--accent); }
 @media (max-width: 1180px) {
   .ops-grid { grid-template-columns: 1fr; }
   .ops-side { grid-template-columns: repeat(2, minmax(0, 1fr)); }

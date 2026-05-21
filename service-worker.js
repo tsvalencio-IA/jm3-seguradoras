@@ -1,4 +1,4 @@
-const CACHE_NAME = "jm-guinchos-custos-frota-combustivel-v17-1";
+const CACHE_NAME = "jm-guinchos-v18-provas-assinatura-seguradoras";
 const ASSETS = [
   "./",
   "./index.html",
