@@ -1,10 +1,10 @@
-﻿(function () {
+(function () {
   "use strict";
 
   const { $, esc, parseMoney, toast, statusClass, routeKm, mapsRouteUrl, statusKey, statusLabel, isFinalStatus, setupCollapsiblePanels } = window.JM.utils;
   const { auth, db, arrayUnion } = window.JM.firebase;
   const cfg = window.JM_CONFIG || {};
-  const DRIVER_FLOW_VERSION = "jm-v18-1-gps-endereco-paineis";
+  const DRIVER_FLOW_VERSION = "jm-v19-polimento-fluxo-mobile";
   const state = { user: null, profile: null, calls: {}, vehicles: {}, expenses: {}, settings: {} };
   const unsubscribers = [];
   let driverLocationWatchId = null;
@@ -14,7 +14,7 @@
     { key: "rear", input: "proofPhotoRear", label: "Traseira" },
     { key: "right", input: "proofPhotoRight", label: "Lateral direita" },
     { key: "left", input: "proofPhotoLeft", label: "Lateral esquerda" },
-    { key: "dashboard", input: "proofPhotoDashboard", label: "Painel / odÃ´metro" },
+    { key: "dashboard", input: "proofPhotoDashboard", label: "Painel / odômetro" },
     { key: "damage", input: "proofPhotoDamage", label: "Avarias" },
     { key: "final", input: "proofPhotoFinal", label: "Comprovante final" }
   ];
@@ -22,8 +22,8 @@
 
   function friendlyAuthError(err) {
     const code = err && err.code || "";
-    if (code === "auth/invalid-credential" || code === "auth/wrong-password" || code === "auth/user-not-found") return "UsuÃ¡rio ou senha invÃ¡lidos.";
-    return "Acesso negado: " + (err && err.message || "falha de autenticaÃ§Ã£o");
+    if (code === "auth/invalid-credential" || code === "auth/wrong-password" || code === "auth/user-not-found") return "Usuário ou senha inválidos.";
+    return "Acesso negado: " + (err && err.message || "falha de autenticação");
   }
 
   function stopListeners() {
@@ -110,9 +110,9 @@
     if (call && call.vehicleId) {
       vehicleSelect.value = call.vehicleId;
       const vehicle = state.vehicles[call.vehicleId] || {};
-      if (box) box.innerHTML = `Vinculado automaticamente ao chamado <b>${esc(callProtocolLabel(call, callId))}</b>, veÃ­culo <b>${esc(vehicle.placa || call.vehicleId)}</b> e pagador <b>${esc(callDisplayName(call) || "nÃ£o informado")}</b>.`;
+      if (box) box.innerHTML = `Vinculado automaticamente ao chamado <b>${esc(callProtocolLabel(call, callId))}</b>, veículo <b>${esc(vehicle.placa || call.vehicleId)}</b> e pagador <b>${esc(callDisplayName(call) || "não informado")}</b>.`;
     } else if (box) {
-      box.textContent = callId ? "Chamado sem veÃ­culo definido. Selecione o veÃ­culo manualmente." : "Escolha um chamado para puxar veÃ­culo, protocolo e seguradora automaticamente.";
+      box.textContent = callId ? "Chamado sem veículo definido. Selecione o veículo manualmente." : "Escolha um chamado para puxar veículo, protocolo e seguradora automaticamente.";
     }
   }
 
@@ -208,10 +208,10 @@
       active: data && data.active !== false
     });
     if (!isDriverRole(profile.role)) {
-      throw new Error("Este login existe, mas nÃ£o estÃ¡ marcado como motorista.");
+      throw new Error("Este login existe, mas não está marcado como motorista.");
     }
     if (profile.active === false) {
-      throw new Error("Seu usuÃ¡rio nÃ£o estÃ¡ ativo no cadastro da JM Guinchos.");
+      throw new Error("Seu usuário não está ativo no cadastro da JM Guinchos.");
     }
     return profile;
   }
@@ -261,7 +261,7 @@
       await ref.set(repaired, { merge: true });
       return { id: user.uid, ...repaired };
     }
-    throw new Error("Seu motorista existe no Auth, mas nÃ£o estÃ¡ liberado em driverAccess. Recrie/atualize o motorista no jm.html depois de publicar as regras novas.");
+    throw new Error("Seu motorista existe no Auth, mas não está liberado em driverAccess. Recrie/atualize o motorista no jm.html depois de publicar as regras novas.");
   }
 
   function startListeners() {
@@ -350,7 +350,7 @@
           <div><b>${esc(call.protocolo || call.id)}</b><br><span class="muted small">${esc(call.cliente || "")} - ${esc(vehicle.placa || "")}</span></div>
           <span class="badge ${statusClass(call)}">${esc(statusLabel(call))}</span>
         </div>
-        <p class="small"><b>Origem:</b> ${esc(call.origem?.label || call.originLabel || "-")}<br><b>Destino:</b> ${esc(call.destino?.label || call.destLabel || "-")}<br><b>Rota:</b> ${esc(metric)} ${routeBadge} ${proof}<br><b>Acionamento:</b> ${esc(call.source || "Particular")}${call.insurance ? " Â· " + esc(call.insurance) : ""}${call.insuranceProtocol ? " Â· Prot. " + esc(call.insuranceProtocol) : ""}<br><b>VeÃ­culo cliente:</b> ${esc(call.customerPlate || "-")} ${call.customerVehicle ? "Â· " + esc(call.customerVehicle) : ""}</p>
+        <p class="small"><b>Origem:</b> ${esc(call.origem?.label || call.originLabel || "-")}<br><b>Destino:</b> ${esc(call.destino?.label || call.destLabel || "-")}<br><b>Rota:</b> ${esc(metric)} ${routeBadge} ${proof}<br><b>Acionamento:</b> ${esc(call.source || "Particular")}${call.insurance ? " · " + esc(call.insurance) : ""}${call.insuranceProtocol ? " · Prot. " + esc(call.insuranceProtocol) : ""}<br><b>Veículo cliente:</b> ${esc(call.customerPlate || "-")} ${call.customerVehicle ? "· " + esc(call.customerVehicle) : ""}</p>
         <div class="actions">
           ${url ? `<a class="btn good" target="_blank" href="${esc(url)}">Abrir rota no Maps</a>` : ""}
           <button class="btn primary" onclick="JM.motorista.setStatus('${esc(call.id)}','motorista_a_caminho')">A caminho</button>
@@ -361,7 +361,7 @@
           <button class="btn good" onclick="JM.motorista.setStatus('${esc(call.id)}','finalizado')">Finalizar</button>
         </div>
       </div>`;
-    }).join("") + `<div class="report-signature">Powered by thIAguinho SoluÃ§Ãµes Digitais</div>` : `<p class="muted">Nenhum chamado vinculado ao seu usuÃ¡rio.</p>`;
+    }).join("") + `<div class="report-signature">Powered by thIAguinho Soluções Digitais</div>` : `<p class="muted">Nenhum chamado vinculado ao seu usuário.</p>`;
   }
 
   function renderExpenseSelects() {
@@ -392,7 +392,7 @@
       navigator.geolocation.clearWatch(driverLocationWatchId);
     }
     driverLocationWatchId = null;
-    setDriverLocationStatus("LocalizaÃ§Ã£o do celular desligada.", "muted");
+    setDriverLocationStatus("Localização do celular desligada.", "muted");
   }
 
   async function saveDriverLocationPoint(callId, pos) {
@@ -420,7 +420,7 @@
   }
 
   async function startDriverPhoneLocation(callIdOverride) {
-    if (!navigator.geolocation) return toast("Este celular/navegador nÃ£o liberou geolocalizaÃ§Ã£o.", "danger");
+    if (!navigator.geolocation) return toast("Este celular/navegador não liberou geolocalização.", "danger");
     const callId = callIdOverride || $("driverLocationCall") && $("driverLocationCall").value;
     const call = callId && state.calls[callId];
     if (!call) return toast("Selecione um chamado ativo para enviar a localizacao do celular.", "danger");
@@ -462,9 +462,9 @@
           phoneLocationUpdatedAt: point.capturedAt,
           updatedAt: point.capturedAt
         }, { merge: true });
-        setDriverLocationStatus("LocalizaÃ§Ã£o ativa: " + point.lat.toFixed(6) + ", " + point.lng.toFixed(6) + " Â· precisÃ£o " + Math.round(point.accuracy || 0) + "m", "ok");
+        setDriverLocationStatus("Localização ativa: " + point.lat.toFixed(6) + ", " + point.lng.toFixed(6) + " · precisão " + Math.round(point.accuracy || 0) + "m", "ok");
       } catch (err) {
-        setDriverLocationStatus("Falha ao enviar localizaÃ§Ã£o: " + (err && err.message || "permissÃ£o negada"), "danger");
+        setDriverLocationStatus("Falha ao enviar localização: " + (err && err.message || "permissão negada"), "danger");
       }
     }, (err) => {
       setDriverLocationStatus("GPS em espera: autorize localizacao ou aguarde sinal melhor. Detalhe: " + err.message, "danger");
@@ -477,21 +477,30 @@
     const key = statusKey(status);
     const label = statusLabel(key);
     if (key === "finalizado" && !["completo", "revisado"].includes(call.proofStatus || proofStatusFor(call))) {
-      return toast("Antes de finalizar, salve checklist, fotos obrigatÃ³rias e assinatura/aceite do cliente em Provas do atendimento.", "danger");
+      return toast("Antes de finalizar, salve checklist, fotos obrigatórias e assinatura/aceite do cliente em Provas do atendimento.", "danger");
     }
-    await db.collection("calls").doc(id).update({
+    const now = new Date().toISOString();
+    const updates = {
       status: label,
       statusKey: key,
-      closedAt: key === "finalizado" ? new Date().toISOString() : call.closedAt || "",
+      closedAt: key === "finalizado" ? now : call.closedAt || "",
+      finalizedAt: key === "finalizado" ? now : call.finalizedAt || "",
       closedBy: key === "finalizado" ? state.user.uid : call.closedBy || "",
       closedByEmail: key === "finalizado" ? state.user.email : call.closedByEmail || "",
       locked: key === "finalizado" ? true : call.locked || false,
       phoneLocationActive: key === "finalizado" ? false : call.phoneLocationActive || false,
-      updatedAt: new Date().toISOString(),
-      timeline: arrayUnion({ at: new Date().toISOString(), by: state.profile.nome || state.user.email, text: "Motorista alterou status para " + label })
-    });
+      updatedAt: now,
+      timeline: arrayUnion({ at: now, by: state.profile.nome || state.user.email, text: "Motorista alterou status para " + label })
+    };
+    if (key === "finalizado" && Number(call.valor || 0) > 0) {
+      updates.billingStatus = "a_faturar";
+      updates.financePending = true;
+      updates.finalizedByDriver = true;
+      updates.finalizedAwaitingBilling = true;
+    }
+    await db.collection("calls").doc(id).update(updates);
     if (key === "finalizado") stopDriverPhoneLocation();
-    toast("Chamado atualizado.", "ok");
+    toast(key === "finalizado" && Number(call.valor || 0) > 0 ? "Chamado finalizado e enviado para a fila de faturamento da central." : "Chamado atualizado.", "ok");
   }
 
   async function uploadToCloudinaryAsset(file, options) {
@@ -524,14 +533,14 @@
     e.preventDefault();
     const photo = $("driverExpensePhoto").files && $("driverExpensePhoto").files[0];
     let photoUrl = "";
-    try { photoUrl = await uploadToCloudinary(photo); } catch (err) { toast("Foto nÃ£o enviada: " + err.message, "danger"); }
+    try { photoUrl = await uploadToCloudinary(photo); } catch (err) { toast("Foto não enviada: " + err.message, "danger"); }
     const callId = $("driverExpenseCall").value;
     const call = callId && state.calls[callId] || null;
     const vehicleId = call && call.vehicleId || $("driverExpenseVehicle").value;
     const expenseType = $("driverExpenseType").value;
     const expenseNotes = $("driverExpenseNotes").value.trim();
-    if (isVehicleCostType(expenseType, expenseNotes) && !vehicleId) return toast("Despesa de frota precisa estar vinculada a um veÃ­culo. Selecione o caminhÃ£o/guincho antes de enviar.", "danger");
-    if (callId && !vehicleId) return toast("Este chamado ainda nÃ£o tem veÃ­culo. Selecione o veÃ­culo antes de enviar a despesa.", "danger");
+    if (isVehicleCostType(expenseType, expenseNotes) && !vehicleId) return toast("Despesa de frota precisa estar vinculada a um veículo. Selecione o caminhão/guincho antes de enviar.", "danger");
+    if (callId && !vehicleId) return toast("Este chamado ainda não tem veículo. Selecione o veículo antes de enviar a despesa.", "danger");
     await db.collection("expenses").add({
       callId,
       vehicleId,
@@ -557,17 +566,17 @@
     });
     e.target.reset();
     syncDriverExpenseContext();
-    toast("Despesa enviada para aprovaÃ§Ã£o jÃ¡ vinculada ao chamado, veÃ­culo e pagador.", "ok");
+    toast("Despesa enviada para aprovação já vinculada ao chamado, veículo e pagador.", "ok");
   };
 
   $("driverReportForm") && ($("driverReportForm").onsubmit = async (e) => {
     e.preventDefault();
     const callId = $("driverReportCall").value;
     const call = state.calls[callId];
-    if (!call) return toast("Selecione um chamado ativo para enviar relatÃ³rio.", "danger");
+    if (!call) return toast("Selecione um chamado ativo para enviar relatório.", "danger");
     const photo = $("driverReportPhoto").files && $("driverReportPhoto").files[0];
     let photoUrl = "";
-    try { photoUrl = await uploadToCloudinary(photo); } catch (err) { toast("Foto nÃ£o enviada: " + err.message, "danger"); }
+    try { photoUrl = await uploadToCloudinary(photo); } catch (err) { toast("Foto não enviada: " + err.message, "danger"); }
     await db.collection("calls").doc(callId).update({
       driverReports: arrayUnion({
         at: new Date().toISOString(),
@@ -576,11 +585,11 @@
         notes: $("driverReportNotes").value.trim(),
         photoUrl
       }),
-      timeline: arrayUnion({ at: new Date().toISOString(), by: state.profile.nome || state.user.email, text: "Motorista enviou relatÃ³rio/checklist" }),
+      timeline: arrayUnion({ at: new Date().toISOString(), by: state.profile.nome || state.user.email, text: "Motorista enviou relatório/checklist" }),
       updatedAt: new Date().toISOString()
     });
     e.target.reset();
-    toast("RelatÃ³rio enviado para a central.", "ok");
+    toast("Relatório enviado para a central.", "ok");
   });
 
   $("driverProofForm") && ($("driverProofForm").onsubmit = async (e) => {
@@ -591,10 +600,10 @@
     if (!call) return toast("Selecione um chamado ativo para salvar as provas.", "danger");
     const cloud = activeCloudinaryConfig();
     if (!cloud.cloudName || !cloud.uploadPreset) {
-      return toast("Cloudinary nÃ£o estÃ¡ configurado. PeÃ§a ao superadmin para salvar cloudName e uploadPreset antes de enviar fotos/assinatura.", "danger");
+      return toast("Cloudinary não está configurado. Peça ao superadmin para salvar cloudName e uploadPreset antes de enviar fotos/assinatura.", "danger");
     }
     const acceptedText = $("signatureAcceptedText").value.trim();
-    if (!acceptedText) return toast("O aceite textual Ã© obrigatÃ³rio para a assinatura do cliente.", "danger");
+    if (!acceptedText) return toast("O aceite textual é obrigatório para a assinatura do cliente.", "danger");
     if (!signaturePad || !signaturePad.dirty && !hasSignature(call)) {
       return toast("Colete a assinatura do cliente final na tela antes de salvar as provas.", "danger");
     }
@@ -603,7 +612,7 @@
       carregamento: { status: $("proofStageCarregamento").value, label: "Carregamento" },
       transporte: { status: $("proofStageTransporte").value, label: "Transporte" },
       entrega: { status: $("proofStageEntrega").value, label: "Entrega" },
-      finalizacao: { status: $("proofStageFinalizacao").value, label: "FinalizaÃ§Ã£o" },
+      finalizacao: { status: $("proofStageFinalizacao").value, label: "Finalização" },
       notes: $("proofChecklistNotes").value.trim(),
       updatedAt: new Date().toISOString(),
       updatedBy: state.user.uid
@@ -616,7 +625,7 @@
       const input = $(photo.input);
       return !hasPhotoType(call, photo.key) && !(input && input.files && input.files[0]);
     });
-    if (missingPhoto) return toast("Foto obrigatÃ³ria faltando: " + missingPhoto.label + ".", "danger");
+    if (missingPhoto) return toast("Foto obrigatória faltando: " + missingPhoto.label + ".", "danger");
     submit.disabled = true;
     submit.textContent = "Enviando provas...";
     try {
@@ -688,9 +697,9 @@
         signaturePad.ctx.clearRect(0, 0, signaturePad.canvas.width, signaturePad.canvas.height);
         signaturePad.dirty = false;
       }
-      toast(nextProofStatus === "completo" ? "Provas completas. O chamado jÃ¡ pode ser finalizado." : "Provas salvas parcialmente.", nextProofStatus === "completo" ? "ok" : "warn");
+      toast(nextProofStatus === "completo" ? "Provas completas. O chamado já pode ser finalizado." : "Provas salvas parcialmente.", nextProofStatus === "completo" ? "ok" : "warn");
     } catch (err) {
-      toast("NÃ£o consegui salvar as provas: " + (err && err.message || "falha operacional"), "danger");
+      toast("Não consegui salvar as provas: " + (err && err.message || "falha operacional"), "danger");
     } finally {
       submit.disabled = false;
       submit.textContent = "Salvar provas e assinatura";

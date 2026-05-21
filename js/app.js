@@ -1,16 +1,16 @@
-﻿(function () {
+(function () {
   "use strict";
 
   const {
     $, $all, esc, money, parseMoney, dateTime, todayInput, plateKey, isValidPlate,
     uidSafe, coords, pointFrom, routeKm, mapsRouteUrl, normalizeUrl, toast, statusClass,
-    statusKey, statusLabel, isFinalStatus: utilIsFinalStatus, maskPhone, phoneWhatsappUrl,
+    statusKey, statusLabel, isFinalStatus: utilIsFinalStatus, maskPhone, maskCpf, maskCnpj, validateCpf, validateCnpj, digits, phoneWhatsappUrl,
     geometryToFirestore, setupCollapsiblePanels
   } = window.JM.utils;
   const { auth, secondaryAuth, db, ts, arrayUnion, emailIsAdmin } = window.JM.firebase;
   const cfg = window.JM_CONFIG || {};
-  const SYSTEM_SIGNATURE = "Powered by thIAguinho SoluÃ§Ãµes Digitais";
-  const LOGIN_FLOW_VERSION = "jm-v18-1-gps-endereco-paineis";
+  const SYSTEM_SIGNATURE = "Powered by thIAguinho Soluções Digitais";
+  const LOGIN_FLOW_VERSION = "jm-v19-polimento-fluxo-mobile";
   let trackerTimer = null;
   let trackerBusy = false;
 
@@ -234,7 +234,7 @@
       });
     } catch (err) {
       console.warn("Falha ao gravar auditoria", err);
-      toast("A aÃ§Ã£o foi preparada, mas a auditoria foi bloqueada. Publique as firestore.rules da V16 antes de operar exclusÃµes.", "danger");
+      toast("A ação foi preparada, mas a auditoria foi bloqueada. Publique as firestore.rules da V16 antes de operar exclusões.", "danger");
       throw err;
     }
   }
@@ -285,7 +285,7 @@
   }
 
   function vehicleCostKindLabel(kind) {
-    if (kind === "maintenance") return "ManutenÃ§Ã£o";
+    if (kind === "maintenance") return "Manutenção";
     if (kind === "operational") return "Operacional";
     return "Geral";
   }
@@ -358,6 +358,43 @@
     return out;
   }
 
+  function isCallReceivableTx(t) {
+    return !!t && (t.module === "call_receivable" || t.sourceType === "call_receivable" || String(t.id || "") === sourceDocId("call_receivable", t.callId));
+  }
+
+  function isCallPaymentReceiptTx(t) {
+    return !!t && (t.module === "payment_receipt" || t.sourceType === "payment_receipt");
+  }
+
+  function receivedValueFromReceipt(t) {
+    if (!t || !statusMeansReceived(t.status)) return 0;
+    return Number(t.receivedAmount != null ? t.receivedAmount : t.paidAmount != null ? t.paidAmount : t.amount || 0);
+  }
+
+  function revenueValueForTotals(t, rows) {
+    if (!t || t.type !== "entrada") return 0;
+    if (isCallPaymentReceiptTx(t) && t.callId && rows.some((r) => r.id !== t.id && r.callId === t.callId && isCallReceivableTx(r))) return 0;
+    return Number(t.amount || 0);
+  }
+
+  async function syncReceivableTransaction(callId, summary) {
+    if (!callId || !summary) return;
+    const txId = sourceDocId("call_receivable", callId);
+    const ref = db.collection("transactions").doc(txId);
+    const snap = await ref.get();
+    if (!snap.exists || snap.data().deletedAt) return;
+    const balance = Math.max(0, Number(summary.balanceAmount || 0));
+    const paid = Number(summary.paidAmount || 0);
+    const status = Number(summary.expectedAmount || 0) <= 0 ? "Sem valor" : paid <= 0 ? "A receber" : balance > 0.009 ? "Parcial" : "Recebido";
+    await ref.set({
+      paidAmount: paid,
+      balanceAmount: balance,
+      status,
+      updatedAt: new Date().toISOString(),
+      updatedBy: state.user && state.user.uid || "system"
+    }, { merge: true });
+  }
+
   async function recalculateCallFinancials(callId) {
     if (!callId || !canManageFinance()) return;
     const call = await getDocData("calls", callId, state.calls);
@@ -370,14 +407,16 @@
     });
     const entradas = rows.filter((t) => t.type === "entrada");
     const saidas = rows.filter((t) => t.type === "saida");
-    const expectedFromReceivable = entradas
-      .filter((t) => t.module === "call_receivable" || t.sourceType === "call_receivable" || t.sourceType === "call")
-      .reduce((sum, t) => sum + Number(t.amount || 0), 0);
+    const receivables = entradas.filter(isCallReceivableTx);
+    const receipts = entradas.filter(isCallPaymentReceiptTx);
+    const expectedFromReceivable = receivables.reduce((sum, t) => sum + Number(t.amount || 0), 0);
     const expectedAmount = Math.max(Number(call.valor || 0), expectedFromReceivable);
-    const paidAmount = entradas.reduce((sum, t) => {
-      if (statusMeansReceived(t.status)) return sum + Number(t.paidAmount || t.receivedAmount || t.amount || 0);
-      return sum + Number(t.paidAmount || t.receivedAmount || 0);
-    }, 0);
+    const paidFromReceipts = receipts.reduce((sum, t) => sum + receivedValueFromReceipt(t), 0);
+    const paidFromReceivable = receivables.reduce((sum, t) => sum + Number(t.paidAmount || t.receivedAmount || 0), 0);
+    const paidFromLegacy = entradas
+      .filter((t) => !isCallReceivableTx(t) && !isCallPaymentReceiptTx(t) && statusMeansReceived(t.status))
+      .reduce((sum, t) => sum + Number(t.paidAmount || t.receivedAmount || t.amount || 0), 0);
+    const paidAmount = paidFromReceipts > 0 ? paidFromReceipts + paidFromLegacy : Math.max(paidFromReceivable, paidFromLegacy);
     const costAmount = saidas.reduce((sum, t) => sum + Number(t.amount || 0), 0);
     const balanceAmount = Math.max(0, expectedAmount - paidAmount);
     let billingStatus = call.billingStatus || "aberto";
@@ -386,36 +425,49 @@
     } else if (isFinalStatus(call.statusKey || call.status)) {
       billingStatus = "sem_valor";
     }
-    await db.collection("calls").doc(callId).set({
-      financialSummary: {
-        expectedAmount,
-        paidAmount,
-        costAmount,
-        balanceAmount,
-        profitAmount: expectedAmount - costAmount,
-        marginPercent: expectedAmount > 0 ? Math.round(((expectedAmount - costAmount) / expectedAmount) * 10000) / 100 : 0,
-        transactionsCount: rows.length,
-        recalculatedAt: new Date().toISOString()
-      },
+    const activeReceivableId = receivables[0] && receivables[0].id || "";
+    const summary = {
+      expectedAmount,
+      paidAmount,
+      costAmount,
+      balanceAmount,
+      profitAmount: expectedAmount - costAmount,
+      marginPercent: expectedAmount > 0 ? Math.round(((expectedAmount - costAmount) / expectedAmount) * 10000) / 100 : 0,
+      transactionsCount: rows.length,
+      receiptsCount: receipts.length,
+      recalculatedAt: new Date().toISOString()
+    };
+    const callUpdate = {
+      financialSummary: summary,
       billingStatus,
       paidAmount,
       balanceAmount,
       costAmount,
       updatedFinancialAt: new Date().toISOString()
-    }, { merge: true });
+    };
+    if (activeReceivableId) {
+      callUpdate.financeCreated = true;
+      callUpdate.receivableTransactionId = activeReceivableId;
+    } else if (call.receivableTransactionId && !rows.some((t) => t.id === call.receivableTransactionId)) {
+      callUpdate.financeCreated = false;
+      callUpdate.receivableTransactionId = "";
+      if (isFinalStatus(call.statusKey || call.status) && expectedAmount > 0) callUpdate.billingStatus = "a_faturar";
+    }
+    await db.collection("calls").doc(callId).set(callUpdate, { merge: true });
+    await syncReceivableTransaction(callId, summary);
   }
 
   async function upsertCallReceivable(callId, options) {
     if (!callId || !canManageFinance()) return null;
     const call = await getDocData("calls", callId, state.calls);
     if (!call) {
-      toast("Chamado vinculado ao recebimento nÃ£o foi encontrado.", "danger");
+      toast("Chamado vinculado ao recebimento não foi encontrado.", "danger");
       return null;
     }
     const now = new Date().toISOString();
     const txId = sourceDocId("call_receivable", callId);
     const expectedAmount = Math.max(Number(call.valor || 0), Number(options && options.expectedAmount || options && options.amount || 0));
-    const paidAmount = statusMeansReceived(options && options.status) ? Number(options && options.paidAmount != null ? options.paidAmount : options && options.amount || expectedAmount) : Number(options && options.paidAmount || 0);
+    const paidAmount = Number(options && options.paidAmount || call.paidAmount || 0);
     const balanceAmount = Math.max(0, expectedAmount - paidAmount);
     const status = options && options.status || (paidAmount <= 0 ? "A receber" : balanceAmount > 0.009 ? "Parcial" : "Recebido");
     const base = enrichFinancialPayloadFromCall({
@@ -446,10 +498,49 @@
       paidAmount,
       balanceAmount,
       updatedFinancialAt: now,
-      timeline: arrayUnion({ at: now, by: personName(), text: "Financeiro do chamado atualizado automaticamente" })
+      timeline: arrayUnion({ at: now, by: personName(), text: "Conta a receber do chamado atualizada automaticamente" })
     }, { merge: true });
     await recalculateCallFinancials(callId);
     return txId;
+  }
+
+  async function createOrUpdatePaymentReceipt(callId, payload, editingId) {
+    if (!callId || !payload || !canManageFinance()) return null;
+    const call = await getDocData("calls", callId, state.calls);
+    if (!call) return null;
+    const amount = Number(payload.amount || 0);
+    if (amount <= 0) {
+      toast("Informe o valor recebido.", "danger");
+      return null;
+    }
+    await upsertCallReceivable(callId, { status: "A receber", amount: Math.max(Number(call.valor || 0), amount), dueDate: payload.dueDate, category: payload.category || "Receita de chamado" });
+    const now = new Date().toISOString();
+    const current = editingId && state.transactions[editingId] || null;
+    const receiptId = current && isCallPaymentReceiptTx(current) ? editingId : db.collection("transactions").doc().id;
+    const receipt = enrichFinancialPayloadFromCall(Object.assign({}, payload, {
+      module: "payment_receipt",
+      sourceType: "payment_receipt",
+      sourceId: receiptId,
+      receiptId,
+      type: "entrada",
+      status: "Recebido",
+      paidAmount: amount,
+      receivedAmount: amount,
+      balanceAmount: 0,
+      callId,
+      updatedAt: now,
+      updatedBy: state.user.uid
+    }), call);
+    const ref = db.collection("transactions").doc(receiptId);
+    const snap = await ref.get();
+    await ref.set(Object.assign(snap.exists ? {} : { createdAt: now, createdBy: state.user.uid }, receipt), { merge: true });
+    await db.collection("calls").doc(callId).set({
+      lastPaymentTransactionId: receiptId,
+      lastPaymentAt: now,
+      timeline: arrayUnion({ at: now, by: personName(), text: `Recebimento registrado: ${money(amount)}` })
+    }, { merge: true });
+    await recalculateCallFinancials(callId);
+    return receiptId;
   }
 
   async function upsertTransactionFromExpense(expenseId, expenseData) {
@@ -470,14 +561,14 @@
       expenseId,
       type: "saida",
       date: todayInput(),
-      description: `Despesa ${expenseData.type || ""}${expenseData.driverName ? " - " + expenseData.driverName : ""}${linked.protocol ? " Â· " + linked.protocol : ""}`,
+      description: `Despesa ${expenseData.type || ""}${expenseData.driverName ? " - " + expenseData.driverName : ""}${linked.protocol ? " · " + linked.protocol : ""}`,
       category: expenseData.type || "Despesa motorista",
       amount,
       status: "Pendente",
       callId: linked.callId || "",
       vehicleId,
       driverId,
-      costCenter: vehicleId ? "Frota" : "OperaÃ§Ã£o",
+      costCenter: vehicleId ? "Frota" : "Operação",
       vehicleCost: !!vehicleId,
       vehicleCostKind: vehicleCostKind(expenseData.type, expenseData.notes),
       vehicleCostCategory: expenseData.type || "Despesa motorista",
@@ -528,7 +619,7 @@
         financialTransactionId: txId,
         vehicleId,
         date: todayInput(),
-        description: expenseData.notes || `Despesa de ${expenseData.type || "manutenÃ§Ã£o"}`,
+        description: expenseData.notes || `Despesa de ${expenseData.type || "manutenção"}`,
         odometerKm: expenseData.odometerKm || "",
         cost: amount,
         status: "concluida",
@@ -558,15 +649,15 @@
       maintenanceId,
       type: "saida",
       date: maintenanceData.date || todayInput(),
-      description: `ManutenÃ§Ã£o ${vehicle && vehicle.placa || maintenanceData.vehicleId || ""} - ${maintenanceData.description || ""}`,
-      category: "ManutenÃ§Ã£o de frota",
+      description: `Manutenção ${vehicle && vehicle.placa || maintenanceData.vehicleId || ""} - ${maintenanceData.description || ""}`,
+      category: "Manutenção de frota",
       amount,
       status: maintenanceData.status === "concluida" ? "Pago" : "Pendente",
       vehicleId: maintenanceData.vehicleId || "",
-      costCenter: maintenanceData.vehicleId ? "Frota" : "OperaÃ§Ã£o",
+      costCenter: maintenanceData.vehicleId ? "Frota" : "Operação",
       vehicleCost: !!maintenanceData.vehicleId,
       vehicleCostKind: "maintenance",
-      vehicleCostCategory: "ManutenÃ§Ã£o de frota",
+      vehicleCostCategory: "Manutenção de frota",
       odometerKm: maintenanceData.odometerKm || "",
       updatedAt: now,
       updatedBy: state.user.uid
@@ -582,7 +673,7 @@
   function slaInfo(call) {
     if (!call || !call.slaLimitAt) return { label: "Sem SLA", className: "muted", overdue: false };
     const limit = new Date(call.slaLimitAt);
-    if (Number.isNaN(limit.getTime())) return { label: "SLA invÃ¡lido", className: "warn", overdue: false };
+    if (Number.isNaN(limit.getTime())) return { label: "SLA inválido", className: "warn", overdue: false };
     const diff = limit.getTime() - Date.now();
     if (isFinalStatus(call.statusKey || call.status)) return { label: "SLA encerrado", className: "ok", overdue: false };
     if (diff < 0) return { label: "SLA vencido", className: "danger", overdue: true };
@@ -631,9 +722,9 @@
     if (point) {
       $(latId).value = String(point.lat);
       $(lngId).value = String(point.lng);
-      addressStatus(statusId, "EndereÃ§o validado: " + normalized.label + " (" + point.lat.toFixed(6) + ", " + point.lng.toFixed(6) + ")", "ok");
+      addressStatus(statusId, "Endereço validado: " + normalized.label + " (" + point.lat.toFixed(6) + ", " + point.lng.toFixed(6) + ")", "ok");
     } else {
-      addressStatus(statusId, "EndereÃ§o ainda sem coordenadas. Cole link do mapa com coordenadas ou informe latitude/longitude.", "danger");
+      addressStatus(statusId, "Endereço ainda sem coordenadas. Cole link do mapa com coordenadas ou informe latitude/longitude.", "danger");
     }
     state.smartRoute = null;
     renderSmartRouteBox();
@@ -684,7 +775,7 @@
     if (!gm) return;
     const settings = activeMapSettings();
     if (false) {
-      addressStatus("originGeoStatus", "Modo gratuito ativo: cole link compartilhado do mapa ou coordenadas. NÃ£o usa API paga.", "warn");
+      addressStatus("originGeoStatus", "Modo gratuito ativo: cole link compartilhado do mapa ou coordenadas. Não usa API paga.", "warn");
       return;
     }
     if ($("callOriginLabel") && !$("callOriginLabel").dataset.addressToolsReady) {
@@ -737,18 +828,18 @@
   }
 
   function useCurrentLocationAsOrigin() {
-    if (!navigator.geolocation) return toast("Este navegador nÃ£o liberou geolocalizaÃ§Ã£o.", "danger");
-    addressStatus("originGeoStatus", "Capturando localizaÃ§Ã£o do aparelho...", "muted");
+    if (!navigator.geolocation) return toast("Este navegador não liberou geolocalização.", "danger");
+    addressStatus("originGeoStatus", "Capturando localização do aparelho...", "muted");
     navigator.geolocation.getCurrentPosition((pos) => {
       setAddress("origin", {
-        label: "LocalizaÃ§Ã£o atual do aparelho",
+        label: "Localização atual do aparelho",
         coords: { lat: pos.coords.latitude, lng: pos.coords.longitude },
         source: "browser_geolocation",
         resolvedAt: new Date().toISOString()
       });
-      toast("LocalizaÃ§Ã£o atual aplicada como origem.", "ok");
+      toast("Localização atual aplicada como origem.", "ok");
     }, (err) => {
-      addressStatus("originGeoStatus", "NÃ£o foi possÃ­vel obter localizaÃ§Ã£o: " + err.message, "danger");
+      addressStatus("originGeoStatus", "Não foi possível obter localização: " + err.message, "danger");
     }, { enableHighAccuracy: true, timeout: 12000 });
   }
 
@@ -761,18 +852,18 @@
     if (!box) return;
     const route = state.smartRoute;
     if (!route || !route.rankings || !route.rankings.length) {
-      box.innerHTML = "Informe a origem e clique em <b>TraÃ§ar rota inteligente</b>. O algoritmo usa posiÃ§Ã£o do tracker, status do veÃ­culo, distÃ¢ncia e tempo estimado.";
+      box.innerHTML = "Informe a origem e clique em <b>Traçar rota inteligente</b>. O algoritmo usa posição do tracker, status do veículo, distância e tempo estimado.";
       return;
     }
     box.innerHTML = route.rankings.slice(0, 5).map((r, i) => {
       const v = r.vehicle || {};
-      const badge = i === 0 ? '<span class="badge ok">RECOMENDADO</span>' : '<span class="badge info">OpÃ§Ã£o ' + (i + 1) + '</span>';
+      const badge = i === 0 ? '<span class="badge ok">RECOMENDADO</span>' : '<span class="badge info">Opção ' + (i + 1) + '</span>';
       const src = r.toOrigin && r.toOrigin.source === "osrm_openstreetmap" ? "OSM/OSRM por ruas" : "fallback estimado";
       return `<div class="smart-route-card">
-        <div>${badge} <b>${esc(v.placa || v.id || "VeÃ­culo")}</b> <span class="muted">${esc(v.apelido || v.tipo || "")}</span></div>
-        <div>AtÃ© a origem: <b>${esc(r.toOrigin.distanceText || r.kmToOrigin.toFixed(1) + " km")}</b> Â· <b>${esc(r.toOrigin.durationTrafficText || r.toOrigin.durationText || r.minutesToOrigin + " min")}</b> Â· fonte: ${esc(src)}</div>
-        ${r.serviceRoute ? `<div>Origem â†’ destino: <b>${esc(r.serviceRoute.distanceText || "")}</b> Â· <b>${esc(r.serviceRoute.durationTrafficText || r.serviceRoute.durationText || "")}</b></div>` : ""}
-        <div class="actions"><button class="btn primary" type="button" onclick="JM.app.applySmartVehicle('${esc(v.id)}')">Usar este veÃ­culo</button>${r.routeUrl ? `<a class="btn" target="_blank" href="${esc(r.routeUrl)}">Abrir rota</a>` : ""}</div>
+        <div>${badge} <b>${esc(v.placa || v.id || "Veículo")}</b> <span class="muted">${esc(v.apelido || v.tipo || "")}</span></div>
+        <div>Até a origem: <b>${esc(r.toOrigin.distanceText || r.kmToOrigin.toFixed(1) + " km")}</b> · <b>${esc(r.toOrigin.durationTrafficText || r.toOrigin.durationText || r.minutesToOrigin + " min")}</b> · fonte: ${esc(src)}</div>
+        ${r.serviceRoute ? `<div>Origem → destino: <b>${esc(r.serviceRoute.distanceText || "")}</b> · <b>${esc(r.serviceRoute.durationTrafficText || r.serviceRoute.durationText || "")}</b></div>` : ""}
+        <div class="actions"><button class="btn primary" type="button" onclick="JM.app.applySmartVehicle('${esc(v.id)}')">Usar este veículo</button>${r.routeUrl ? `<a class="btn" target="_blank" href="${esc(r.routeUrl)}">Abrir rota</a>` : ""}</div>
       </div>`;
     }).join("");
   }
@@ -793,15 +884,15 @@
       destination = addressFromInputs("destination");
     }
     const located = Object.values(state.vehicles || {}).filter((v) => pointFrom(v.location));
-    if (!located.length) return toast("Nenhum veÃ­culo tem posiÃ§Ã£o de tracker. Sincronize o tracker no superadmin primeiro.", "danger");
-    $("smartRouteBox").innerHTML = "Calculando melhor veÃ­culo e tempo de rota...";
+    if (!located.length) return toast("Nenhum veículo tem posição de tracker. Sincronize o tracker no superadmin primeiro.", "danger");
+    $("smartRouteBox").innerHTML = "Calculando melhor veículo e tempo de rota...";
     try {
       const rankings = await gm.rankVehicles(state.vehicles, finalOrigin.coords, destination && destination.coords, activeMapSettings());
       state.smartRoute = { origin: finalOrigin, destination, rankings, calculatedAt: new Date().toISOString() };
       const best = bestSmartRoute();
       if (best && !$("callVehicle").value) $("callVehicle").value = best.vehicle.id;
       renderSmartRouteBox();
-      toast("Rota inteligente calculada por ruas/rodovias quando o OSRM estiver disponÃ­vel.", "ok");
+      toast("Rota inteligente calculada por ruas/rodovias quando o OSRM estiver disponível.", "ok");
     } catch (err) {
       $("smartRouteBox").innerHTML = `<span class="danger">${esc(err.message)}</span>`;
       toast(err.message, "danger");
@@ -810,7 +901,7 @@
 
   function applySmartVehicle(vehicleId) {
     if ($("callVehicle")) $("callVehicle").value = vehicleId || "";
-    toast("VeÃ­culo aplicado ao chamado.", "ok");
+    toast("Veículo aplicado ao chamado.", "ok");
   }
 
   async function readSharedRouteLink() {
@@ -822,7 +913,7 @@
     const parsed = gm && gm.parseRouteInput ? gm.parseRouteInput(raw) : { externalUrl: normalizeUrl(raw), points: [] };
     if (parsed.externalUrl) input.value = parsed.externalUrl;
     if (!parsed.points || !parsed.points.length) {
-      routeLinkStatus("Link salvo para abrir fora do sistema. Ele nÃ£o trouxe coordenadas visÃ­veis; mantenha origem/destino preenchidos para desenhar a rota no mapa interno.", "warn");
+      routeLinkStatus("Link salvo para abrir fora do sistema. Ele não trouxe coordenadas visíveis; mantenha origem/destino preenchidos para desenhar a rota no mapa interno.", "warn");
       return;
     }
     if (parsed.points.length === 1) {
@@ -869,7 +960,7 @@
     const external = currentExternalRouteUrl();
     const points = routePointsFromForm(true);
     const url = external || (window.JM.googleMaps && window.JM.googleMaps.routeUrl(points) || mapsRouteUrl(points));
-    if (!url) return toast("Informe origem/destino e selecione veÃ­culo com posiÃ§Ã£o para abrir a rota.", "danger");
+    if (!url) return toast("Informe origem/destino e selecione veículo com posição para abrir a rota.", "danger");
     window.open(url, "_blank");
   }
 
@@ -882,7 +973,7 @@
       chamados: "Chamados",
       finalizados: "Finalizados",
       clientes: "Clientes / seguradoras",
-      integracoes: "IntegraÃ§Ãµes",
+      integracoes: "Integrações",
       mapa: "Mapa / Tracker",
       motorista: "Painel motorista",
       financeiro: "Financeiro",
@@ -935,7 +1026,7 @@
     renderSmartRouteBox();
     addressStatus("originGeoStatus", "Aguardando link do mapa ou coordenadas.", "muted");
     addressStatus("destGeoStatus", "Destino opcional; pode ser link compartilhado ou coordenadas.", "muted");
-    routeLinkStatus("Opcional: cole o link compartilhado da rota para abrir no Maps/Waze e, se ele trouxer coordenadas visÃ­veis, preencher origem/destino.", "muted");
+    routeLinkStatus("Opcional: cole o link compartilhado da rota para abrir no Maps/Waze e, se ele trouxer coordenadas visíveis, preencher origem/destino.", "muted");
     if ($("callRouteExternalUrl")) $("callRouteExternalUrl").value = "";
   }
 
@@ -943,7 +1034,7 @@
     if ($("teamForm")) $("teamForm").reset();
     state.editingUserId = null;
     if ($("teamEmail")) $("teamEmail").readOnly = false;
-    if ($("teamPass")) $("teamPass").placeholder = "mÃ­nimo 6 caracteres";
+    if ($("teamPass")) $("teamPass").placeholder = "mínimo 6 caracteres";
     setSubmitText("teamForm", "Criar/atualizar equipe");
     if ($("teamCancelEdit")) $("teamCancelEdit").classList.add("hidden");
   }
@@ -974,7 +1065,7 @@
   function resetMaintenanceForm() {
     if ($("maintenanceForm")) $("maintenanceForm").reset();
     state.editingMaintenanceId = null;
-    setSubmitText("maintenanceForm", "Salvar manutenÃ§Ã£o");
+    setSubmitText("maintenanceForm", "Salvar manutenção");
     if ($("maintenanceCancelEdit")) $("maintenanceCancelEdit").classList.add("hidden");
     if ($("maintenanceDate")) $("maintenanceDate").value = todayInput();
   }
@@ -994,6 +1085,11 @@
       const el = $(id);
       if (el) el.oninput = () => { el.value = maskPhone(el.value); };
     });
+    const doc = $("customerDocument");
+    if (doc) doc.oninput = () => {
+      const only = digits(doc.value);
+      doc.value = only.length > 11 ? maskCnpj(only) : maskCpf(only);
+    };
   }
 
   function reportSignature() {
@@ -1002,7 +1098,7 @@
 
   function gestorAccessAllowedByConfig(user) {
     const authCfg = cfg.auth || {};
-    // MantÃ©m a trava por lista de e-mails quando ela existir.
+    // Mantém a trava por lista de e-mails quando ela existir.
     // Se a lista estiver vazia/removida, o sistema permite o primeiro gestor criar o perfil.
     const list = (authCfg.adminEmails || []).map((e) => String(e).toLowerCase().trim()).filter(Boolean);
     if (!list.length) return { allowed: true, role: "admin", source: "config-empty" };
@@ -1051,7 +1147,7 @@
     const current = snap.exists ? { id: user.uid, ...snap.data() } : null;
 
     if (current && current.active === false) {
-      throw new Error("Este usuÃ¡rio estÃ¡ inativo no cadastro da JM Guinchos.");
+      throw new Error("Este usuário está inativo no cadastro da JM Guinchos.");
     }
 
     const baseProfile = {
@@ -1069,12 +1165,12 @@
     const configAccess = gestorAccessAllowedByConfig(user);
     const registryAccess = configAccess.allowed ? configAccess : await gestorAccessAllowedByRegistry(user);
     if (!registryAccess.allowed) {
-      throw new Error("Este e-mail nÃ£o estÃ¡ liberado como gestor. Crie/libere o gestor no superadmin antes de acessar o jm.html.");
+      throw new Error("Este e-mail não está liberado como gestor. Crie/libere o gestor no superadmin antes de acessar o jm.html.");
     }
 
-    // CorreÃ§Ã£o definitiva do bug: jm.html Ã© painel gestor.
-    // Se o usuÃ¡rio foi criado como driver/motorista por fluxo antigo, repara para admin/financeiro
-    // usando a autorizaÃ§Ã£o por e-mail gravada pelo superadmin em managerAccess/{email}.
+    // Correção definitiva do bug: jm.html é painel gestor.
+    // Se o usuário foi criado como driver/motorista por fluxo antigo, repara para admin/financeiro
+    // usando a autorização por e-mail gravada pelo superadmin em managerAccess/{email}.
     const repairedProfile = {
       ...baseProfile,
       role: registryAccess.role || "admin",
@@ -1087,7 +1183,7 @@
       return await saveGestorProfile(ref, repairedProfile, current || null);
     } catch (err) {
       if (err && err.code === "permission-denied") {
-        throw new Error("O login foi aceito, mas o Firestore bloqueou a correÃ§Ã£o do perfil. Publique as novas firestore.rules deste ZIP ou altere o documento users/" + user.uid + " para role: admin.");
+        throw new Error("O login foi aceito, mas o Firestore bloqueou a correção do perfil. Publique as novas firestore.rules deste ZIP ou altere o documento users/" + user.uid + " para role: admin.");
       }
       throw err;
     }
@@ -1122,8 +1218,8 @@
       const unmapped = positions.length - matched;
       const now = new Date().toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" });
       const detail = unmapped > 0 ? ` (${unmapped} sem vinculo com placa; ajuste o deviceId no superadmin)` : "";
-      setTrackerStatus(`Tracker RAFA sincronizado: ${positions.length} posiÃ§Ã£o(Ãµes), ${matched} vinculada(s) Ã s ${now}${detail}.`, unmapped > 0 ? "warn" : "ok");
-      if (manual) toast(`${positions.length} posiÃ§Ã£o(Ãµes) sincronizada(s), ${matched} vinculada(s).${detail}`, unmapped > 0 ? "warn" : "ok");
+      setTrackerStatus(`Tracker RAFA sincronizado: ${positions.length} posição(ões), ${matched} vinculada(s) às ${now}${detail}.`, unmapped > 0 ? "warn" : "ok");
+      if (manual) toast(`${positions.length} posição(ões) sincronizada(s), ${matched} vinculada(s).${detail}`, unmapped > 0 ? "warn" : "ok");
       return positions;
     } catch (err) {
       console.error(err);
@@ -1146,7 +1242,7 @@
       return;
     }
     const polling = Math.max(15000, Number(tracker.pollingMs || 30000));
-    setTrackerStatus("Tracker configurado. AtualizaÃ§Ã£o automÃ¡tica a cada " + Math.round(polling / 1000) + "s.", "ok");
+    setTrackerStatus("Tracker configurado. Atualização automática a cada " + Math.round(polling / 1000) + "s.", "ok");
     syncTrackerNow(false);
     trackerTimer = setInterval(() => syncTrackerNow(false), polling);
   }
@@ -1227,7 +1323,7 @@
     } catch (err) {
       $("appView").classList.add("hidden");
       $("loginView").classList.remove("hidden");
-      $("loginError").textContent = err && err.message ? err.message : "Acesso de gestor nÃ£o autorizado.";
+      $("loginError").textContent = err && err.message ? err.message : "Acesso de gestor não autorizado.";
       await auth.signOut().catch(() => {});
     }
   });
@@ -1245,7 +1341,7 @@
   function friendlyAuthError(err) {
     const code = err && err.code || "";
     if (code === "auth/invalid-credential" || code === "auth/wrong-password" || code === "auth/user-not-found") {
-      return "UsuÃ¡rio ou senha invÃ¡lidos. O acesso de gestor deve existir no Firebase Authentication.";
+      return "Usuário ou senha inválidos. O acesso de gestor deve existir no Firebase Authentication.";
     }
     if (code === "auth/operation-not-allowed") {
       return "Ative o provedor E-mail/Senha no Firebase Authentication.";
@@ -1253,7 +1349,7 @@
     if (code === "auth/too-many-requests") {
       return "Muitas tentativas. Aguarde alguns minutos ou redefina a senha no Firebase.";
     }
-    return "Acesso negado: " + (err && err.message || "falha de autenticaÃ§Ã£o");
+    return "Acesso negado: " + (err && err.message || "falha de autenticação");
   }
 
   function renderAll() {
@@ -1294,7 +1390,7 @@
     const vehicleOptions = vehicles.map((v) => `<option value="${esc(v.id)}">${esc(v.placa || v.id)} - ${esc(v.apelido || v.tipo || "")}</option>`).join("");
     setOptionsPreservingValue("callVehicle", `<option value="">Selecione</option>${vehicleOptions}`);
     setOptionsPreservingValue("expenseVehicle", `<option value="">Selecione</option>${vehicleOptions}`);
-    setOptionsPreservingValue("finVehicle", `<option value="">Sem veÃ­culo</option>${vehicleOptions}`);
+    setOptionsPreservingValue("finVehicle", `<option value="">Sem veículo</option>${vehicleOptions}`);
     setOptionsPreservingValue("maintenanceVehicle", `<option value="">Selecione</option>${vehicleOptions}`);
     const drivers = visibleRows(state.users).filter((u) => u.active !== false && DRIVER_ROLES.includes(normalizedRole(u.role)));
     const driverOptions = drivers.map((u) => `<option value="${esc(u.id)}">${esc(u.nome || u.email)}</option>`).join("");
@@ -1379,12 +1475,12 @@
     const vehicleOptions = visibleRows(state.vehicles).sort((a, b) => String(a.placa || a.id || "").localeCompare(String(b.placa || b.id || "")));
     setOptionsPreservingValue("opsInsuranceFilter", `<option value="">Todas seguradoras</option>` + insuranceOptions.map((v) => `<option value="${esc(v)}">${esc(v)}</option>`).join(""));
     setOptionsPreservingValue("opsDriverFilter", `<option value="">Todos motoristas</option>` + driverOptions.map((u) => `<option value="${esc(u.id)}">${esc(u.nome || u.email)}</option>`).join(""));
-    setOptionsPreservingValue("opsVehicleFilter", `<option value="">Todos veÃ­culos</option>` + vehicleOptions.map((v) => `<option value="${esc(v.id)}">${esc(v.placa || v.id)}</option>`).join(""));
+    setOptionsPreservingValue("opsVehicleFilter", `<option value="">Todos veículos</option>` + vehicleOptions.map((v) => `<option value="${esc(v.id)}">${esc(v.placa || v.id)}</option>`).join(""));
     $("opsKpis").innerHTML = `
       <div class="card kpi col-3"><span>Fila ativa</span><strong>${active.length}</strong></div>
       <div class="card kpi col-3"><span>Aguardando despacho</span><strong>${waiting.length}</strong></div>
       <div class="card kpi col-3"><span>Em atendimento</span><strong>${inRoute.length}</strong></div>
-      <div class="card kpi col-3"><span>Seguradoras/assistÃªncias</span><strong>${insurance.length}</strong></div>
+      <div class="card kpi col-3"><span>Seguradoras/assistências</span><strong>${insurance.length}</strong></div>
       <div class="card kpi col-3"><span>Frota online</span><strong>${onlineVehicles.length}</strong></div>
       <div class="card kpi col-3"><span>Sem rota precisa</span><strong>${active.filter((c) => !(c.routePrecision === "osrm_openstreetmap" || c.routeMetrics && c.routeMetrics.fullRoute && c.routeMetrics.fullRoute.isPrecise)).length}</strong></div>
       <div class="card kpi col-3"><span>Urgentes</span><strong>${active.filter((c) => String(c.priority).toLowerCase() === "urgente").length}</strong></div>
@@ -1405,10 +1501,10 @@
       const wa = phoneWhatsappUrl(c.phone, `JM Guinchos - chamado ${c.protocolo || c.id}`);
       return `<div class="ops-card${selected}" onclick="JM.app.selectOperationalCall('${esc(c.id)}')">
         <div class="actions" style="justify-content:space-between"><b>${esc(c.protocolo || c.cliente || c.id)}</b><span class="badge ${statusClass(st)}">${esc(st)}</span></div>
-        <div class="small"><b>${esc(c.cliente || "Cliente")}</b> ${c.phone ? `Â· ${esc(c.phone)}` : ""}</div>
-        <div class="muted small">${esc(c.source || "Particular")}${c.insurance ? ` Â· ${esc(c.insurance)}` : ""}${c.insuranceProtocol ? ` Â· Prot. ${esc(c.insuranceProtocol)}` : ""}</div>
-        <div class="small">${esc(c.originLabel || c.origem && c.origem.label || "Origem nÃ£o informada")} â†’ ${esc(c.destLabel || c.destino && c.destino.label || "Destino aberto")}</div>
-        <div class="muted small">Frota: ${esc(vehicle.placa || "sem veÃ­culo")} Â· Motorista: ${esc(driver.nome || driver.email || "sem motorista")}</div>
+        <div class="small"><b>${esc(c.cliente || "Cliente")}</b> ${c.phone ? `· ${esc(c.phone)}` : ""}</div>
+        <div class="muted small">${esc(c.source || "Particular")}${c.insurance ? ` · ${esc(c.insurance)}` : ""}${c.insuranceProtocol ? ` · Prot. ${esc(c.insuranceProtocol)}` : ""}</div>
+        <div class="small">${esc(c.originLabel || c.origem && c.origem.label || "Origem não informada")} → ${esc(c.destLabel || c.destino && c.destino.label || "Destino aberto")}</div>
+        <div class="muted small">Frota: ${esc(vehicle.placa || "sem veículo")} · Motorista: ${esc(driver.nome || driver.email || "sem motorista")}</div>
         <div class="actions ops-mini-actions">
           <button class="btn" type="button" onclick="event.stopPropagation();JM.app.setCallStatus('${esc(c.id)}','motorista_a_caminho')">A caminho</button>
           <button class="btn" type="button" onclick="event.stopPropagation();JM.app.setCallStatus('${esc(c.id)}','motorista_no_local')">No local</button>
@@ -1429,16 +1525,16 @@
       const stale = v.location && age != null && age > 10;
       return `<div class="ops-card vehicle${selected}" onclick="JM.app.selectOperationalVehicle('${esc(v.id)}')">
         <div class="actions" style="justify-content:space-between"><b>${esc(v.placa || v.id)}</b><span class="badge ${online ? 'ok' : stale ? 'warn' : 'muted'}">${online ? 'online' : stale ? 'atrasado' : 'sem GPS'}</span></div>
-        <div class="muted small">${esc(v.apelido || v.tipo || "VeÃ­culo")}</div>
-        <div class="small">${v.location ? `Lat ${esc(v.location.lat)} Â· Lng ${esc(v.location.lng)}` : 'Sem posiÃ§Ã£o do tracker'}</div>
-        <div class="muted small">${age == null ? 'sem atualizaÃ§Ã£o' : 'Ãºltima posiÃ§Ã£o hÃ¡ ' + age + ' min'}</div>
+        <div class="muted small">${esc(v.apelido || v.tipo || "Veículo")}</div>
+        <div class="small">${v.location ? `Lat ${esc(v.location.lat)} · Lng ${esc(v.location.lng)}` : 'Sem posição do tracker'}</div>
+        <div class="muted small">${age == null ? 'sem atualização' : 'última posição há ' + age + ' min'}</div>
       </div>`;
-    }).join("") : `<p class="muted">Nenhum veÃ­culo cadastrado.</p>`;
+    }).join("") : `<p class="muted">Nenhum veículo cadastrado.</p>`;
 
     const hint = $("opsMapHint");
     if (hint) {
       const v = state.vehicles[state.selectedVehicleId];
-      hint.textContent = selectedCall ? `Chamado selecionado: ${selectedCall.protocolo || selectedCall.cliente || selectedCall.id}. VeÃ­culo: ${v ? (v.placa || v.id) : 'nÃ£o selecionado'}.` : "Selecione um chamado para acompanhar no mapa.";
+      hint.textContent = selectedCall ? `Chamado selecionado: ${selectedCall.protocolo || selectedCall.cliente || selectedCall.id}. Veículo: ${v ? (v.placa || v.id) : 'não selecionado'}.` : "Selecione um chamado para acompanhar no mapa.";
     }
   }
 
@@ -1460,7 +1556,7 @@
     if (!canOperateCalls()) return toast("Somente equipe operacional autorizada pode despachar.", "danger");
     const callId = state.selectedCallId;
     const vehicleId = state.selectedVehicleId;
-    if (!callId || !vehicleId) return toast("Selecione um chamado e um veÃ­culo.", "danger");
+    if (!callId || !vehicleId) return toast("Selecione um chamado e um veículo.", "danger");
     const vehicle = state.vehicles[vehicleId];
     await db.collection("calls").doc(callId).update({
       vehicleId,
@@ -1468,9 +1564,9 @@
       statusKey: "despachado",
       dispatchedAt: new Date().toISOString(),
       dispatchedBy: state.user.uid,
-      timeline: arrayUnion({ at: new Date().toISOString(), by: state.profile.nome || state.user.email, text: "VeÃ­culo " + (vehicle && (vehicle.placa || vehicle.id) || vehicleId) + " despachado pela Central Operacional" })
+      timeline: arrayUnion({ at: new Date().toISOString(), by: state.profile.nome || state.user.email, text: "Veículo " + (vehicle && (vehicle.placa || vehicle.id) || vehicleId) + " despachado pela Central Operacional" })
     });
-    toast("VeÃ­culo despachado para o chamado.", "ok");
+    toast("Veículo despachado para o chamado.", "ok");
   }
 
   function openSelectedCallRoute() {
@@ -1502,7 +1598,7 @@ Rota: ${url}`;
   function renderCalls() {
     const rows = visibleRows(state.calls).filter((c) => !isFinalStatus(c)).sort((a, b) => String(b.createdAt || "").localeCompare(String(a.createdAt || "")));
     if (!rows.length) return $("callsTable").innerHTML = `<p class="muted">Nenhum chamado registrado.</p>`;
-    $("callsTable").innerHTML = `<table><thead><tr><th>Protocolo</th><th>Cliente</th><th>Origem/Destino</th><th>VeÃ­culo</th><th>Status</th><th>AÃ§Ãµes</th></tr></thead><tbody>` + rows.map((c) => {
+    $("callsTable").innerHTML = `<table><thead><tr><th>Protocolo</th><th>Cliente</th><th>Origem/Destino</th><th>Veículo</th><th>Status</th><th>Ações</th></tr></thead><tbody>` + rows.map((c) => {
       const vehicle = state.vehicles[c.vehicleId] || {};
       const driver = state.users[c.driverId] || {};
       const url = c.routeExternalUrl || c.routeUrl || mapsRouteUrl(c, vehicle);
@@ -1516,8 +1612,8 @@ Rota: ${url}`;
       const sla = slaInfo(c);
       return `<tr>
         <td><b>${esc(c.protocolo || c.id)}</b><br><span class="muted small">${dateTime(c.createdAt)}</span></td>
-        <td>${esc(c.cliente || "")}<br><span class="muted small">${esc(c.phone || "")}</span><br><span class="muted small">${esc(c.source || "Particular")}${c.insurance ? " Â· " + esc(c.insurance) : ""}${c.insuranceProtocol ? " Â· Prot. " + esc(c.insuranceProtocol) : ""}</span></td>
-        <td><span class="small">${esc(c.originLabel || c.origem && c.origem.label || "-")}</span><br><span class="muted small">â†’ ${esc(c.destLabel || c.destino && c.destino.label || "-")}</span><br><b>${esc(metric)}</b>${routeBadge}${url ? `<br><a class="info small" target="_blank" href="${esc(url)}">Abrir rota no Maps</a>` : ""}</td>
+        <td>${esc(c.cliente || "")}<br><span class="muted small">${esc(c.phone || "")}</span><br><span class="muted small">${esc(c.source || "Particular")}${c.insurance ? " · " + esc(c.insurance) : ""}${c.insuranceProtocol ? " · Prot. " + esc(c.insuranceProtocol) : ""}</span></td>
+        <td><span class="small">${esc(c.originLabel || c.origem && c.origem.label || "-")}</span><br><span class="muted small">→ ${esc(c.destLabel || c.destino && c.destino.label || "-")}</span><br><b>${esc(metric)}</b>${routeBadge}${url ? `<br><a class="info small" target="_blank" href="${esc(url)}">Abrir rota no Maps</a>` : ""}</td>
         <td>${esc(vehicle.placa || "-")}<br><span class="muted small">${esc(driver.nome || driver.email || "Sem motorista")}</span></td>
         <td><span class="badge ${statusClass(c)}">${esc(operationalStatus(c))}</span>${valueHtml}<br><span class="badge ${sla.className}">${esc(sla.label)}</span><br>${proofStatusBadge(c)}</td>
         <td class="row-actions"><button class="btn" onclick="JM.app.selectCallDossier('${esc(c.id)}')">Painel</button><button class="btn good" onclick="JM.app.setCallStatus('${esc(c.id)}','despachado')">Despachar</button><button class="btn primary" onclick="JM.app.setCallStatus('${esc(c.id)}','motorista_a_caminho')">A caminho</button><button class="btn" onclick="JM.app.setCallStatus('${esc(c.id)}','finalizado')">Finalizar</button>${viewProofActions}${proofActions}${adminActions}</td>
@@ -1535,14 +1631,14 @@ Rota: ${url}`;
   function renderFinalizedCalls() {
     if (!$("finalizedCallsTable")) return;
     const rows = visibleRows(state.calls).filter((c) => isFinalStatus(c)).sort((a, b) => String(b.closedAt || b.finalizedAt || b.updatedAt || "").localeCompare(String(a.closedAt || a.finalizedAt || a.updatedAt || "")));
-    $("finalizedCallsTable").innerHTML = rows.length ? `<table><thead><tr><th>Chamado</th><th>Cliente/seguradora</th><th>Fechamento</th><th>Provas</th><th>AÃ§Ãµes</th></tr></thead><tbody>` + rows.map((c) => {
+    $("finalizedCallsTable").innerHTML = rows.length ? `<table><thead><tr><th>Chamado</th><th>Cliente/seguradora</th><th>Fechamento</th><th>Provas</th><th>Ações</th></tr></thead><tbody>` + rows.map((c) => {
       const driver = state.users[c.driverId] || {};
       const vehicle = state.vehicles[c.vehicleId] || {};
       return `<tr>
-        <td><b>${esc(c.protocolo || c.id)}</b><br><span class="muted small">${esc(vehicle.placa || c.vehicleId || "sem veÃ­culo")}</span></td>
-        <td>${esc(c.cliente || "")}<br><span class="muted small">${esc(c.insurance || c.source || "")}${c.insuranceProtocol ? " Â· Prot. " + esc(c.insuranceProtocol) : ""}</span></td>
-        <td><span class="badge ok">${esc(operationalStatus(c))}</span><br><span class="muted small">${dateTime(c.closedAt || c.finalizedAt || c.updatedAt)} Â· ${esc(driver.nome || driver.email || "motorista")}</span><br><span class="badge ${c.locked !== false ? "warn" : "info"}">${c.locked !== false ? "travado" : "reaberto"}</span></td>
-        <td>${proofStatusBadge(c)}<br><span class="muted small">CobranÃ§a: ${esc(c.billingStatus || "aberto")}</span></td>
+        <td><b>${esc(c.protocolo || c.id)}</b><br><span class="muted small">${esc(vehicle.placa || c.vehicleId || "sem veículo")}</span></td>
+        <td>${esc(c.cliente || "")}<br><span class="muted small">${esc(c.insurance || c.source || "")}${c.insuranceProtocol ? " · Prot. " + esc(c.insuranceProtocol) : ""}</span></td>
+        <td><span class="badge ok">${esc(operationalStatus(c))}</span><br><span class="muted small">${dateTime(c.closedAt || c.finalizedAt || c.updatedAt)} · ${esc(driver.nome || driver.email || "motorista")}</span><br><span class="badge ${c.locked !== false ? "warn" : "info"}">${c.locked !== false ? "travado" : "reaberto"}</span></td>
+        <td>${proofStatusBadge(c)}<br><span class="muted small">Cobrança: ${esc(c.billingStatus || "aberto")}</span></td>
         <td class="row-actions"><button class="btn" onclick="JM.app.selectCallDossier('${esc(c.id)}')">Painel</button><button class="btn" onclick="JM.app.viewCallProofs('${esc(c.id)}')">Checklist/fotos</button>${canOwnCompany() || hasRole(["gerente"]) ? `<button class="btn warn" onclick="JM.app.reopenCall('${esc(c.id)}')">Reabrir</button>` : ""}</td>
       </tr>`;
     }).join("") + `</tbody></table>` : `<p class="muted">Nenhum chamado finalizado ainda.</p>`;
@@ -1559,10 +1655,10 @@ Rota: ${url}`;
     }
     const customerPlate = $("callCustomerPlate") ? plateKey($("callCustomerPlate").value) : "";
     if (customerPlate && !isValidPlate(customerPlate)) {
-      return toast("Placa do cliente invÃ¡lida. Use ABC1234 ou ABC1D23.", "danger");
+      return toast("Placa do cliente inválida. Use ABC1234 ou ABC1D23.", "danger");
     }
     if (($("callSource") && /segur|assist/i.test($("callSource").value)) && $("callInsuranceProtocol") && !$("callInsuranceProtocol").value.trim()) {
-      return toast("Chamado de seguradora/assistÃªncia precisa de protocolo para nÃ£o perder o rastreio do acionamento.", "danger");
+      return toast("Chamado de seguradora/assistência precisa de protocolo para não perder o rastreio do acionamento.", "danger");
     }
     const best = bestSmartRoute();
     const routePoints = routePointsFromForm(true);
@@ -1637,7 +1733,7 @@ Rota: ${url}`;
         statusKey: initialKey,
         createdAt: now,
         createdBy: state.user.uid,
-        timeline: [{ at: now, by: personName(), text: "Chamado criado com endereÃ§o validado e rota inteligente" }]
+        timeline: [{ at: now, by: personName(), text: "Chamado criado com endereço validado e rota inteligente" }]
       }));
       if (state.pendingIntegrationId) {
         await db.collection("integrationInbox").doc(state.pendingIntegrationId).set({
@@ -1662,7 +1758,7 @@ Rota: ${url}`;
     const key = statusKey(status);
     const label = statusLabel(key);
     if (isFinalStatus(call) && key !== "finalizado") {
-      return toast("Chamado finalizado fica travado. Use Reabrir com autorizaÃ§Ã£o e motivo auditado.", "danger");
+      return toast("Chamado finalizado fica travado. Use Reabrir com autorização e motivo auditado.", "danger");
     }
     const updates = {
       status: label,
@@ -1679,7 +1775,7 @@ Rota: ${url}`;
       updates.closedByEmail = state.user.email;
       updates.locked = true;
       await db.collection("calls").doc(id).update(updates);
-      return toast("Chamado marcado como finalizado operacional, mas nÃ£o ficou pronto para faturar: faltam checklist, fotos obrigatÃ³rias ou assinatura/aceite.", "warn");
+      return toast("Chamado marcado como finalizado operacional, mas não ficou pronto para faturar: faltam checklist, fotos obrigatórias ou assinatura/aceite.", "warn");
     }
     if (key === "finalizado" && Number(call.valor || 0) > 0) {
       updates.billingStatus = canManageFinance() ? "a_receber" : "a_faturar";
@@ -1706,9 +1802,9 @@ Rota: ${url}`;
   async function reopenCall(id) {
     if (!canOwnCompany() && !hasRole(["gerente"])) return toast("Somente gestor/dono ou gerente pode autorizar reabertura.", "danger");
     const call = state.calls[id];
-    if (!call) return toast("Chamado nÃ£o encontrado.", "danger");
-    if (!isFinalStatus(call)) return toast("Este chamado nÃ£o estÃ¡ finalizado.", "warn");
-    const reason = window.prompt("Motivo obrigatÃ³rio para reabrir o chamado " + (call.protocolo || id) + ":", "CorreÃ§Ã£o autorizada pela gestÃ£o");
+    if (!call) return toast("Chamado não encontrado.", "danger");
+    if (!isFinalStatus(call)) return toast("Este chamado não está finalizado.", "warn");
+    const reason = window.prompt("Motivo obrigatório para reabrir o chamado " + (call.protocolo || id) + ":", "Correção autorizada pela gestão");
     if (reason === null) return;
     if (!String(reason || "").trim()) return toast("Informe um motivo para reabrir com auditoria.", "danger");
     await db.collection("calls").doc(id).set({
@@ -1720,7 +1816,7 @@ Rota: ${url}`;
       reopenedByEmail: state.user.email,
       reopenReason: reason.trim(),
       billingStatus: call.billingStatus === "recebido" ? "recebido" : "aberto",
-      timeline: arrayUnion({ at: new Date().toISOString(), by: personName(), text: "Chamado reaberto com autorizaÃ§Ã£o: " + reason.trim() }),
+      timeline: arrayUnion({ at: new Date().toISOString(), by: personName(), text: "Chamado reaberto com autorização: " + reason.trim() }),
       updatedAt: new Date().toISOString()
     }, { merge: true });
     await db.collection("auditLogs").add({
@@ -1734,14 +1830,14 @@ Rota: ${url}`;
       role: state.profile && state.profile.role || "",
       createdAt: new Date().toISOString()
     }).catch(() => {});
-    toast("Chamado reaberto com autorizaÃ§Ã£o e auditoria.", "ok");
+    toast("Chamado reaberto com autorização e auditoria.", "ok");
   }
 
   function editCall(id) {
     if (!canOwnCompany() && !hasRole(["gerente"])) return toast("Somente gestor/dono ou gerente pode editar chamados.", "danger");
     const call = state.calls[id];
-    if (!call) return toast("Chamado nÃ£o encontrado.", "danger");
-    if (isFinalStatus(call) && call.locked !== false) return toast("Chamado finalizado estÃ¡ travado. Reabra com autorizaÃ§Ã£o antes de editar.", "danger");
+    if (!call) return toast("Chamado não encontrado.", "danger");
+    if (isFinalStatus(call) && call.locked !== false) return toast("Chamado finalizado está travado. Reabra com autorização antes de editar.", "danger");
     state.editingCallId = id;
     showView("chamados");
     setValue("callCustomerId", call.customerId || "");
@@ -1789,15 +1885,15 @@ Rota: ${url}`;
     setValue("callDestLng", destPoint && destPoint.lng);
     state.smartRoute = null;
     renderSmartRouteBox();
-    setSubmitText("callForm", "Salvar alteraÃ§Ãµes do chamado");
+    setSubmitText("callForm", "Salvar alterações do chamado");
     if ($("callCancelEdit")) $("callCancelEdit").classList.remove("hidden");
-    toast("Edite o chamado e salve as alteraÃ§Ãµes.", "ok");
+    toast("Edite o chamado e salve as alterações.", "ok");
   }
 
   async function deleteCall(id) {
     if (!canOwnCompany()) return toast("Somente gestor/dono pode excluir chamados.", "danger");
     const call = state.calls[id];
-    if (!call) return toast("Chamado nÃ£o encontrado.", "danger");
+    if (!call) return toast("Chamado não encontrado.", "danger");
     const label = call.protocolo || call.cliente || id;
     const reason = window.prompt(`Motivo para excluir o chamado ${label}:`, "Cancelamento operacional");
     if (reason === null) return;
@@ -1809,7 +1905,7 @@ Rota: ${url}`;
         deletedAt: new Date().toISOString(),
         deletedBy: state.user.uid,
         deletedByEmail: state.user.email,
-        auditReason: "Vinculado ao chamado excluÃ­do: " + reason
+        auditReason: "Vinculado ao chamado excluído: " + reason
       }, { merge: true });
     });
     await batch.commit();
@@ -1820,21 +1916,21 @@ Rota: ${url}`;
   async function reviewCallProofs(id) {
     if (!canOwnCompany() && !hasRole(["gerente"])) return toast("Somente gestor/dono ou gerente pode revisar provas.", "danger");
     const call = state.calls[id];
-    if (!call) return toast("Chamado nÃ£o encontrado.", "danger");
-    if (!callProofComplete(call)) return toast("Ainda faltam fotos obrigatÃ³rias, checklist ou assinatura/aceite.", "danger");
+    if (!call) return toast("Chamado não encontrado.", "danger");
+    if (!callProofComplete(call)) return toast("Ainda faltam fotos obrigatórias, checklist ou assinatura/aceite.", "danger");
     await db.collection("calls").doc(id).set({
       proofStatus: "revisado",
       proofReviewedAt: new Date().toISOString(),
       proofReviewedBy: state.user.uid,
       billingStatus: Number(call.valor || 0) > 0 ? "a_faturar" : call.billingStatus || "sem_valor",
-      timeline: arrayUnion({ at: new Date().toISOString(), by: personName(), text: "GestÃ£o revisou provas do atendimento para faturamento" })
+      timeline: arrayUnion({ at: new Date().toISOString(), by: personName(), text: "Gestão revisou provas do atendimento para faturamento" })
     }, { merge: true });
     toast("Provas revisadas. Chamado liberado para faturamento.", "ok");
   }
 
   function viewCallProofs(id) {
     const call = state.calls[id];
-    if (!call) return toast("Chamado nÃ£o encontrado.", "danger");
+    if (!call) return toast("Chamado não encontrado.", "danger");
     const photos = proofPhotos(call);
     const signature = call.customerSignature || {};
     const checklist = call.proofChecklist || {};
@@ -1844,7 +1940,7 @@ Rota: ${url}`;
     const checklistHtml = REQUIRED_PROOF_STAGES.map((stage) => `<li><b>${esc(stage)}:</b> ${esc(checklist[stage] && checklist[stage].status || "pendente")}</li>`).join("");
     const win = window.open("", "_blank");
     if (!win) return toast("O navegador bloqueou a janela de provas.", "danger");
-    win.document.write(`<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><title>Provas ${esc(call.protocolo || id)}</title><style>body{font-family:Arial,sans-serif;padding:18px;color:#111827} h1{margin-bottom:4px} .muted{color:#64748b}</style></head><body><h1>Provas do atendimento ${esc(call.protocolo || id)}</h1><p class="muted">${esc(call.cliente || "")} Â· ${esc(call.insurance || "")} Â· ${esc(call.customerPlate || "")}</p><h2>Checklist</h2><ul>${checklistHtml}</ul><p>${esc(checklist.notes || "")}</p><h2>Assinatura</h2>${sigHtml}<h2>Fotos</h2>${photoHtml}</body></html>`);
+    win.document.write(`<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><title>Provas ${esc(call.protocolo || id)}</title><style>body{font-family:Arial,sans-serif;padding:18px;color:#111827} h1{margin-bottom:4px} .muted{color:#64748b}</style></head><body><h1>Provas do atendimento ${esc(call.protocolo || id)}</h1><p class="muted">${esc(call.cliente || "")} · ${esc(call.insurance || "")} · ${esc(call.customerPlate || "")}</p><h2>Checklist</h2><ul>${checklistHtml}</ul><p>${esc(checklist.notes || "")}</p><h2>Assinatura</h2>${sigHtml}<h2>Fotos</h2>${photoHtml}</body></html>`);
     win.document.close();
   }
 
@@ -1874,15 +1970,15 @@ Rota: ${url}`;
     const timeline = (call.timeline || []).slice().reverse().slice(0, 8).map((t) => `<div class="timeline-item"><b>${esc(t.by || t.user || "Sistema")}</b><br>${esc(t.text || t.acao || "")}<br><small>${dateTime(t.at || t.dt)}</small></div>`).join("") || `<p class="muted small">Sem auditoria operacional.</p>`;
     box.innerHTML = `
       <div class="dossier-head">
-        <div><h3>${esc(call.protocolo || call.id)} Â· ${esc(call.cliente || "")}</h3><p class="muted small">${esc(call.insurance || call.source || "Particular")} ${call.insuranceProtocol ? "Â· Prot. " + esc(call.insuranceProtocol) : ""} Â· ${esc(call.customerPlate || "")}</p></div>
-        <div class="actions"><span class="badge ${statusClass(call)}">${esc(operationalStatus(call))}</span>${proofStatusBadge(call)}<button class="btn" onclick="JM.app.viewCallProofs('${esc(call.id)}')">Abrir provas</button>${isFinalStatus(call) && (canOwnCompany() || hasRole(["gerente"])) ? `<button class="btn warn" onclick="JM.app.reopenCall('${esc(call.id)}')">Reabrir com autorizaÃ§Ã£o</button>` : ""}</div>
+        <div><h3>${esc(call.protocolo || call.id)} · ${esc(call.cliente || "")}</h3><p class="muted small">${esc(call.insurance || call.source || "Particular")} ${call.insuranceProtocol ? "· Prot. " + esc(call.insuranceProtocol) : ""} · ${esc(call.customerPlate || "")}</p></div>
+        <div class="actions"><span class="badge ${statusClass(call)}">${esc(operationalStatus(call))}</span>${proofStatusBadge(call)}<button class="btn" onclick="JM.app.viewCallProofs('${esc(call.id)}')">Abrir provas</button>${isFinalStatus(call) && (canOwnCompany() || hasRole(["gerente"])) ? `<button class="btn warn" onclick="JM.app.reopenCall('${esc(call.id)}')">Reabrir com autorização</button>` : ""}</div>
       </div>
       <div class="dossier-grid">
-        <section><h3>OperaÃ§Ã£o</h3><p class="small"><b>Origem:</b> ${esc(call.originLabel || call.origem && call.origem.label || "-")}<br><b>Destino:</b> ${esc(call.destLabel || call.destino && call.destino.label || "-")}<br><b>VeÃ­culo:</b> ${esc(vehicle.placa || call.vehicleId || "-")}<br><b>Motorista:</b> ${esc(driver.nome || driver.email || "-")}</p></section>
+        <section><h3>Operação</h3><p class="small"><b>Origem:</b> ${esc(call.originLabel || call.origem && call.origem.label || "-")}<br><b>Destino:</b> ${esc(call.destLabel || call.destino && call.destino.label || "-")}<br><b>Veículo:</b> ${esc(vehicle.placa || call.vehicleId || "-")}<br><b>Motorista:</b> ${esc(driver.nome || driver.email || "-")}</p></section>
         <section><h3>Checklist</h3>${checklistHtml}<p class="muted small">${esc(checklist.notes || "")}</p></section>
         <section><h3>Fotos</h3><div class="proof-thumbs">${photosHtml}</div></section>
         <section><h3>Assinatura</h3>${sigUrl ? `<p class="small"><b>${esc(sig.name || "Cliente")}</b><br>${esc(sig.document || "")}<br>${dateTime(sig.signedAt)}</p><img class="signature-preview" src="${esc(sigUrl)}" alt="Assinatura">` : `<p class="muted small">Sem assinatura.</p>`}</section>
-        <section><h3>Financeiro</h3><p class="small">CobranÃ§a: <b>${esc(call.billingStatus || "aberto")}</b><br>Valor previsto: <b>${canSeeSensitiveFinance() ? money(call.valor || 0) : "Restrito"}</b><br>Resultado lanÃ§ado: <b>${canSeeSensitiveFinance() ? money(entradas - saidas) : "Restrito"}</b></p></section>
+        <section><h3>Financeiro</h3><p class="small">Cobrança: <b>${esc(call.billingStatus || "aberto")}</b><br>Valor previsto: <b>${canSeeSensitiveFinance() ? money(call.valor || 0) : "Restrito"}</b><br>Resultado lançado: <b>${canSeeSensitiveFinance() ? money(entradas - saidas) : "Restrito"}</b></p></section>
         <section><h3>Linha do tempo</h3>${timeline}</section>
       </div>`;
   }
@@ -1890,21 +1986,21 @@ Rota: ${url}`;
   function renderCustomers() {
     if (!$("customersTable")) return;
     const rows = visibleRows(state.customers).sort((a, b) => String(a.name || "").localeCompare(String(b.name || "")));
-    $("customersTable").innerHTML = rows.length ? `<table><thead><tr><th>Cliente</th><th>Tipo</th><th>Contato</th><th>Faturamento</th><th>AÃ§Ãµes</th></tr></thead><tbody>` + rows.map((c) => {
+    $("customersTable").innerHTML = rows.length ? `<table><thead><tr><th>Cliente</th><th>Tipo</th><th>Contato</th><th>Faturamento</th><th>Ações</th></tr></thead><tbody>` + rows.map((c) => {
       const wa = phoneWhatsappUrl(c.phone, "JM Guinchos");
       return `<tr>
         <td><b>${esc(c.name || c.razaoSocial || c.id)}</b><br><span class="muted small">${esc(c.document || "")}</span></td>
         <td>${esc(c.type || "")}<br><span class="muted small">${esc(c.portalUrl || "")}</span></td>
-        <td>${esc(c.contactName || "")}<br><span class="muted small">${esc(c.phone || "")} ${wa ? `Â· <a class="info" target="_blank" href="${esc(wa)}">WhatsApp</a>` : ""}</span><br><span class="muted small">${esc(c.email || "")}</span></td>
+        <td>${esc(c.contactName || "")}<br><span class="muted small">${esc(c.phone || "")} ${wa ? `· <a class="info" target="_blank" href="${esc(wa)}">WhatsApp</a>` : ""}</span><br><span class="muted small">${esc(c.email || "")}</span></td>
         <td>${esc(c.paymentTerm || "")}<br><span class="badge ${c.glosaRisk === "alto" ? "danger" : c.glosaRisk === "medio" ? "warn" : "ok"}">Glosa ${esc(c.glosaRisk || "baixo")}</span><br><span class="muted small">${esc(c.billingRules || "")}</span><br><span class="muted small">${esc(c.proofRules || "")}</span></td>
         <td class="row-actions"><button class="btn" onclick="JM.app.editCustomer('${esc(c.id)}')">Editar</button><button class="btn danger" onclick="JM.app.deleteCustomer('${esc(c.id)}')">Excluir</button></td>
       </tr>`;
-    }).join("") + `</tbody></table>` : `<p class="muted">Cadastre clientes particulares, empresas, seguradoras e assistÃªncias para vincular chamados e pagamentos.</p>`;
+    }).join("") + `</tbody></table>` : `<p class="muted">Cadastre clientes particulares, empresas, seguradoras e assistências para vincular chamados e pagamentos.</p>`;
   }
 
   $("customerForm") && ($("customerForm").onsubmit = async (e) => {
     e.preventDefault();
-    if (!isOffice()) return toast("Sem permissÃ£o para cadastrar clientes.", "danger");
+    if (!isOffice()) return toast("Sem permissão para cadastrar clientes.", "danger");
     const now = new Date().toISOString();
     const payload = {
       name: $("customerName").value.trim(),
@@ -1924,6 +2020,10 @@ Rota: ${url}`;
       updatedBy: state.user.uid
     };
     if (!payload.name) return toast("Informe o nome do cliente/seguradora.", "danger");
+    const docDigits = digits(payload.document);
+    if (docDigits.length === 11 && !validateCpf(docDigits)) return toast("CPF inválido. Confira os números antes de salvar.", "danger");
+    if (docDigits.length === 14 && !validateCnpj(docDigits)) return toast("CNPJ inválido. Confira os números antes de salvar.", "danger");
+    if (payload.document && ![11, 14].includes(docDigits.length)) return toast("Documento inválido. Informe CPF com 11 dígitos ou CNPJ com 14 dígitos.", "danger");
     if (state.editingCustomerId) {
       await db.collection("customers").doc(state.editingCustomerId).set(payload, { merge: true });
       toast("Cliente atualizado.", "ok");
@@ -1936,7 +2036,7 @@ Rota: ${url}`;
 
   function editCustomer(id) {
     const c = state.customers[id];
-    if (!c) return toast("Cliente nÃ£o encontrado.", "danger");
+    if (!c) return toast("Cliente não encontrado.", "danger");
     state.editingCustomerId = id;
     showView("clientes");
     setValue("customerName", c.name || "");
@@ -1952,7 +2052,7 @@ Rota: ${url}`;
     setValue("customerGlosaRisk", c.glosaRisk || "baixo");
     setValue("customerBillingRules", c.billingRules || "");
     setValue("customerProofRules", c.proofRules || "");
-    setSubmitText("customerForm", "Salvar alteraÃ§Ãµes do cliente");
+    setSubmitText("customerForm", "Salvar alterações do cliente");
     if ($("customerCancelEdit")) $("customerCancelEdit").classList.remove("hidden");
   }
 
@@ -1970,18 +2070,18 @@ Rota: ${url}`;
   function renderIntegrationInbox() {
     if (!$("integrationInboxTable")) return;
     const rows = visibleRows(state.integrationInbox).sort((a, b) => String(b.createdAt || "").localeCompare(String(a.createdAt || "")));
-    $("integrationInboxTable").innerHTML = rows.length ? `<table><thead><tr><th>Origem</th><th>Protocolo</th><th>Cliente</th><th>Status</th><th>AÃ§Ãµes</th></tr></thead><tbody>` + rows.map((row) => `<tr>
-      <td><b>${esc(row.sourceName || row.source || "IntegraÃ§Ã£o")}</b><br><span class="muted small">${esc(row.sourceType || "manual")} Â· ${dateTime(row.createdAt)}</span></td>
+    $("integrationInboxTable").innerHTML = rows.length ? `<table><thead><tr><th>Origem</th><th>Protocolo</th><th>Cliente</th><th>Status</th><th>Ações</th></tr></thead><tbody>` + rows.map((row) => `<tr>
+      <td><b>${esc(row.sourceName || row.source || "Integração")}</b><br><span class="muted small">${esc(row.sourceType || "manual")} · ${dateTime(row.createdAt)}</span></td>
       <td>${esc(row.protocol || row.externalId || "")}<br><span class="muted small">${esc(row.externalId || "")}</span></td>
       <td>${esc(row.customerName || "")}<br><span class="muted small">${esc(row.customerPhone || "")}</span></td>
       <td><span class="badge ${row.status === "convertido" ? "ok" : row.status === "erro" ? "danger" : "warn"}">${esc(row.status || "novo")}</span></td>
       <td class="row-actions"><button class="btn good" onclick="JM.app.applyIntegrationToCall('${esc(row.id)}')">Gerar chamado</button><button class="btn" onclick="JM.app.markIntegrationHandled('${esc(row.id)}')">Marcar tratado</button></td>
-    </tr>`).join("") + `</tbody></table>` : `<p class="muted">Sem acionamentos externos na fila. A integraÃ§Ã£o real entra aqui por webhook, e-mail parser ou robÃ´ autorizado.</p>`;
+    </tr>`).join("") + `</tbody></table>` : `<p class="muted">Sem acionamentos externos na fila. A integração real entra aqui por webhook, e-mail parser ou robô autorizado.</p>`;
   }
 
   $("integrationForm") && ($("integrationForm").onsubmit = async (e) => {
     e.preventDefault();
-    if (!canOperateCalls()) return toast("Sem permissÃ£o para registrar acionamento externo.", "danger");
+    if (!canOperateCalls()) return toast("Sem permissão para registrar acionamento externo.", "danger");
     const normalizedCall = {
       source: "Seguradora",
       insurance: $("intSource").value.trim(),
@@ -2046,7 +2146,7 @@ Rota: ${url}`;
       handledAt: new Date().toISOString(),
       handledBy: state.user.uid
     }, { merge: true }).catch(() => {});
-    toast("Dados aplicados ao formulÃ¡rio de chamado. Complete origem/destino e registre.", "ok");
+    toast("Dados aplicados ao formulário de chamado. Complete origem/destino e registre.", "ok");
   }
 
   async function markIntegrationHandled(id) {
@@ -2073,12 +2173,12 @@ Rota: ${url}`;
       const manutencao = maint.filter((m) => m.vehicleId === v.id).reduce((s, m) => s + Number(m.cost || 0), 0);
       const pendenteMotorista = visibleRows(state.expenses).filter((e) => (e.vehicleId || e.linkedVehicleId) === v.id && e.status === "pendente").reduce((s, e) => s + Number(e.amount || 0), 0);
       const lucro = entrada - saida;
-      return `<tr><td><b>${esc(v.placa || v.id)}</b><br><span class="muted small">${esc(v.apelido || "")}</span></td><td>${esc(v.tipo || "")}</td><td><span class="badge info">${esc(v.status || "")}</span></td><td><span class="badge ${gpsBadge}">${age == null ? "sem GPS" : "hÃ¡ " + age + " min"}</span><br><span class="muted small">${esc(v.trackerId || v.trackerDeviceId || "")}</span></td><td>${canSeeSensitiveFinance() ? `<b>${money(lucro)}</b><br><span class="muted small">Receita ${money(entrada)} Â· Despesas da frota ${money(saida)} Â· Operacional ${money(operacional)} Â· ManutenÃ§Ã£o ${money(Math.max(manutencao, manutencaoFinanceira))}${pendenteMotorista ? ` Â· Pendente motorista ${money(pendenteMotorista)}` : ""}</span>` : "Restrito"}</td></tr>`;
-    }).join("") + `</tbody></table>` : `<p class="muted">Nenhum veÃ­culo.</p>`;
+      return `<tr><td><b>${esc(v.placa || v.id)}</b><br><span class="muted small">${esc(v.apelido || "")}</span></td><td>${esc(v.tipo || "")}</td><td><span class="badge info">${esc(v.status || "")}</span></td><td><span class="badge ${gpsBadge}">${age == null ? "sem GPS" : "há " + age + " min"}</span><br><span class="muted small">${esc(v.trackerId || v.trackerDeviceId || "")}</span></td><td>${canSeeSensitiveFinance() ? `<b>${money(lucro)}</b><br><span class="muted small">Receita ${money(entrada)} · Despesas da frota ${money(saida)} · Operacional ${money(operacional)} · Manutenção ${money(Math.max(manutencao, manutencaoFinanceira))}${pendenteMotorista ? ` · Pendente motorista ${money(pendenteMotorista)}` : ""}</span>` : "Restrito"}</td></tr>`;
+    }).join("") + `</tbody></table>` : `<p class="muted">Nenhum veículo.</p>`;
 
     $("vehicleCards").innerHTML = rows.length ? rows.map((v) => {
       const age = minutesSince(v.lastTrackerAt || v.updatedAt);
-      return `<div class="card col-3"><b>${esc(v.placa || v.id)}</b><p class="muted small">${esc(v.apelido || v.tipo || "")}</p><span class="badge info">${esc(v.status || "")}</span><p class="small">${v.location ? `Lat ${esc(v.location.lat)}<br>Lng ${esc(v.location.lng)}<br>Ãšltima posiÃ§Ã£o hÃ¡ ${age == null ? "?" : age} min` : "Sem posiÃ§Ã£o do tracker"}</p></div>`;
+      return `<div class="card col-3"><b>${esc(v.placa || v.id)}</b><p class="muted small">${esc(v.apelido || v.tipo || "")}</p><span class="badge info">${esc(v.status || "")}</span><p class="small">${v.location ? `Lat ${esc(v.location.lat)}<br>Lng ${esc(v.location.lng)}<br>Última posição há ${age == null ? "?" : age} min` : "Sem posição do tracker"}</p></div>`;
     }).join("") : `<p class="muted">Sem frota cadastrada.</p>`;
   }
 
@@ -2087,7 +2187,7 @@ Rota: ${url}`;
     if (!canManageFleet()) return toast("Somente gestor/dono ou gerente pode editar frota.", "danger");
     const placa = plateKey($("vehiclePlate").value);
     if (!placa) return toast("Informe a placa.", "danger");
-    if (!isValidPlate(placa)) return toast("Placa invÃ¡lida. Use ABC1234 ou ABC1D23.", "danger");
+    if (!isValidPlate(placa)) return toast("Placa inválida. Use ABC1234 ou ABC1D23.", "danger");
     await db.collection("vehicles").doc(placa).set({
       placa,
       apelido: $("vehicleAlias").value.trim(),
@@ -2099,16 +2199,16 @@ Rota: ${url}`;
       updatedBy: state.user.uid
     }, { merge: true });
     e.target.reset();
-    toast("VeÃ­culo salvo.", "ok");
+    toast("Veículo salvo.", "ok");
   };
 
   function renderMaintenance() {
     if (!$("maintenanceTable")) return;
     const rows = visibleRows(state.maintenance).sort((a, b) => String(b.date || b.createdAt || "").localeCompare(String(a.date || a.createdAt || "")));
-    $("maintenanceTable").innerHTML = rows.length ? `<table><thead><tr><th>Data</th><th>VeÃ­culo</th><th>ServiÃ§o</th><th>Status</th><th>Custo</th><th>AÃ§Ãµes</th></tr></thead><tbody>` + rows.map((m) => {
+    $("maintenanceTable").innerHTML = rows.length ? `<table><thead><tr><th>Data</th><th>Veículo</th><th>Serviço</th><th>Status</th><th>Custo</th><th>Ações</th></tr></thead><tbody>` + rows.map((m) => {
       const vehicle = state.vehicles[m.vehicleId] || {};
       return `<tr><td>${esc(m.date || dateTime(m.createdAt))}</td><td>${esc(vehicle.placa || m.vehicleId || "-")}</td><td>${esc(m.description || "")}<br><span class="muted small">${esc(m.odometerKm ? m.odometerKm + " km" : "")}</span></td><td><span class="badge info">${esc(m.status || "aberta")}</span></td><td>${canSeeSensitiveFinance() ? money(m.cost || 0) : "Restrito"}</td><td class="row-actions"><button class="btn" onclick="JM.app.editMaintenance('${esc(m.id)}')">Editar</button><button class="btn danger" onclick="JM.app.deleteMaintenance('${esc(m.id)}')">Excluir</button></td></tr>`;
-    }).join("") + `</tbody></table>` : `<p class="muted">Nenhuma manutenÃ§Ã£o registrada.</p>`;
+    }).join("") + `</tbody></table>` : `<p class="muted">Nenhuma manutenção registrada.</p>`;
   }
 
   function renderVehicleCostsLedger() {
@@ -2120,25 +2220,25 @@ Rota: ${url}`;
     const pending = visibleRows(state.expenses)
       .filter((e) => e.status === "pendente" && (e.vehicleId || e.linkedVehicleId))
       .sort((a, b) => String(b.createdAt || "").localeCompare(String(a.createdAt || "")));
-    const html = `<h3 style="margin-top:18px">Despesas do caminhÃ£o / custos da frota</h3>` +
-      (rows.length || pending.length ? `<table><thead><tr><th>Data</th><th>VeÃ­culo</th><th>Origem</th><th>Categoria</th><th>Status</th><th>Valor</th></tr></thead><tbody>` +
+    const html = `<h3 style="margin-top:18px">Despesas do caminhão / custos da frota</h3>` +
+      (rows.length || pending.length ? `<table><thead><tr><th>Data</th><th>Veículo</th><th>Origem</th><th>Categoria</th><th>Status</th><th>Valor</th></tr></thead><tbody>` +
       pending.map((e) => {
         const vehicle = state.vehicles[e.vehicleId || e.linkedVehicleId] || {};
         const call = state.calls[e.callId || e.linkedCallId] || {};
-        return `<tr><td>${esc(dateTime(e.createdAt))}</td><td>${esc(vehicle.placa || e.vehicleId || e.linkedVehicleId || "-")}</td><td>Motorista pendente<br><span class="muted small">${esc(e.driverName || e.driverId || "")} Â· ${esc(call.protocolo || e.protocol || "")}</span></td><td>${esc(e.type || e.vehicleCostCategory || "Despesa")}</td><td><span class="badge warn">Aguardando aprovaÃ§Ã£o</span></td><td><b>${money(e.amount || 0)}</b></td></tr>`;
+        return `<tr><td>${esc(dateTime(e.createdAt))}</td><td>${esc(vehicle.placa || e.vehicleId || e.linkedVehicleId || "-")}</td><td>Motorista pendente<br><span class="muted small">${esc(e.driverName || e.driverId || "")} · ${esc(call.protocolo || e.protocol || "")}</span></td><td>${esc(e.type || e.vehicleCostCategory || "Despesa")}</td><td><span class="badge warn">Aguardando aprovação</span></td><td><b>${money(e.amount || 0)}</b></td></tr>`;
       }).join("") +
       rows.map((t) => {
         const vehicle = state.vehicles[t.vehicleId] || {};
         const kind = vehicleCostKindLabel(t.vehicleCostKind || (t.sourceType === "maintenance" || t.module === "maintenance" ? "maintenance" : "operational"));
         return `<tr><td>${esc(t.date || dateTime(t.createdAt))}</td><td>${esc(vehicle.placa || t.vehicleId || "-")}</td><td>${esc(t.module || t.sourceType || "financeiro")}<br><span class="muted small">${esc(t.protocol || t.callId || "")}</span></td><td>${esc(t.category || t.vehicleCostCategory || "Despesa")}<br><span class="muted small">${esc(kind)}</span></td><td>${esc(t.status || "")}</td><td><b>${money(t.amount || 0)}</b></td></tr>`;
-      }).join("") + `</tbody></table>` : `<p class="muted">Nenhuma despesa de frota vinculada a veÃ­culo.</p>`);
+      }).join("") + `</tbody></table>` : `<p class="muted">Nenhuma despesa de frota vinculada a veículo.</p>`);
     if ($("vehicleCostsTable")) box.innerHTML = html;
     else box.insertAdjacentHTML("afterend", html);
   }
 
   $("maintenanceForm") && ($("maintenanceForm").onsubmit = async (e) => {
     e.preventDefault();
-    if (!canManageFleet()) return toast("Somente gestor/dono ou gerente pode lanÃ§ar manutenÃ§Ã£o.", "danger");
+    if (!canManageFleet()) return toast("Somente gestor/dono ou gerente pode lançar manutenção.", "danger");
     const now = new Date().toISOString();
     const payload = {
       vehicleId: $("maintenanceVehicle").value,
@@ -2150,26 +2250,26 @@ Rota: ${url}`;
       updatedAt: now,
       updatedBy: state.user.uid
     };
-    if (!payload.vehicleId || !payload.description) return toast("Informe veÃ­culo e serviÃ§o da manutenÃ§Ã£o.", "danger");
+    if (!payload.vehicleId || !payload.description) return toast("Informe veículo e serviço da manutenção.", "danger");
     let maintenanceId = state.editingMaintenanceId;
     if (maintenanceId) {
       await db.collection("maintenance").doc(maintenanceId).set(payload, { merge: true });
       if (canManageFinance()) await upsertTransactionFromMaintenance(maintenanceId, Object.assign({}, state.maintenance[maintenanceId] || {}, payload));
-      toast("ManutenÃ§Ã£o atualizada e refletida no financeiro da frota.", "ok");
+      toast("Manutenção atualizada e refletida no financeiro da frota.", "ok");
     } else {
       const ref = db.collection("maintenance").doc();
       maintenanceId = ref.id;
       await ref.set(Object.assign({ createdAt: now, createdBy: state.user.uid }, payload));
       if (canManageFinance()) await upsertTransactionFromMaintenance(maintenanceId, payload);
-      toast("ManutenÃ§Ã£o registrada e custo lanÃ§ado no financeiro da frota.", "ok");
+      toast("Manutenção registrada e custo lançado no financeiro da frota.", "ok");
     }
     resetMaintenanceForm();
   });
 
   function editMaintenance(id) {
-    if (!canManageFleet()) return toast("Sem permissÃ£o para editar manutenÃ§Ã£o.", "danger");
+    if (!canManageFleet()) return toast("Sem permissão para editar manutenção.", "danger");
     const item = state.maintenance[id];
-    if (!item) return toast("ManutenÃ§Ã£o nÃ£o encontrada.", "danger");
+    if (!item) return toast("Manutenção não encontrada.", "danger");
     state.editingMaintenanceId = id;
     setValue("maintenanceVehicle", item.vehicleId || "");
     setValue("maintenanceDate", item.date || "");
@@ -2177,32 +2277,32 @@ Rota: ${url}`;
     setValue("maintenanceKm", item.odometerKm || "");
     setValue("maintenanceCost", item.cost || "");
     setValue("maintenanceStatus", item.status || "aberta");
-    setSubmitText("maintenanceForm", "Salvar alteraÃ§Ãµes da manutenÃ§Ã£o");
+    setSubmitText("maintenanceForm", "Salvar alterações da manutenção");
     if ($("maintenanceCancelEdit")) $("maintenanceCancelEdit").classList.remove("hidden");
   }
 
   async function deleteMaintenance(id) {
-    if (!canManageFleet()) return toast("Sem permissÃ£o para excluir manutenÃ§Ã£o.", "danger");
+    if (!canManageFleet()) return toast("Sem permissão para excluir manutenção.", "danger");
     const item = state.maintenance[id];
-    if (!item) return toast("ManutenÃ§Ã£o nÃ£o encontrada.", "danger");
-    const reason = window.prompt("Motivo para excluir a manutenÃ§Ã£o:", "CorreÃ§Ã£o de lanÃ§amento");
+    if (!item) return toast("Manutenção não encontrada.", "danger");
+    const reason = window.prompt("Motivo para excluir a manutenção:", "Correção de lançamento");
     if (reason === null) return;
     await softDeleteDoc("maintenance", id, item, reason);
     if (item.financialTransactionId && state.transactions[item.financialTransactionId]) {
-      await softDeleteDoc("transactions", item.financialTransactionId, state.transactions[item.financialTransactionId], "ManutenÃ§Ã£o excluÃ­da: " + reason);
+      await softDeleteDoc("transactions", item.financialTransactionId, state.transactions[item.financialTransactionId], "Manutenção excluída: " + reason);
     }
-    toast("ManutenÃ§Ã£o removida do painel com auditoria e financeiro vinculado baixado.", "ok");
+    toast("Manutenção removida do painel com auditoria e financeiro vinculado baixado.", "ok");
   }
 
   function renderTeam() {
     const rows = visibleRows(state.users).sort((a, b) => String(a.nome || a.email || "").localeCompare(String(b.nome || b.email || "")));
-    $("teamTable").innerHTML = rows.length ? `<table><thead><tr><th>Nome</th><th>E-mail</th><th>Perfil</th><th>Status</th><th>AÃ§Ãµes</th></tr></thead><tbody>` +
+    $("teamTable").innerHTML = rows.length ? `<table><thead><tr><th>Nome</th><th>E-mail</th><th>Perfil</th><th>Status</th><th>Ações</th></tr></thead><tbody>` +
       rows.map((u) => {
         const canDelete = u.id !== state.user?.uid;
         const deleteButton = canDelete ? `<button class="btn danger" onclick="JM.app.deleteTeamMember('${esc(u.id)}')">Excluir</button>` : "";
         return `<tr><td><b>${esc(u.nome || "")}</b><br><span class="muted small">${esc(u.uid || u.id)}</span></td><td>${esc(u.email || "")}</td><td><span class="badge info">${esc(roleLabel(u.role))}</span></td><td>${u.active === false ? "Inativo" : "Ativo"}</td><td class="row-actions"><button class="btn" onclick="JM.app.editTeamMember('${esc(u.id)}')">Editar</button>${deleteButton}</td></tr>`;
       }).join("") +
-      `</tbody></table>` : `<p class="muted">Nenhum usuÃ¡rio.</p>`;
+      `</tbody></table>` : `<p class="muted">Nenhum usuário.</p>`;
   }
 
   function roleLabel(role) {
@@ -2224,9 +2324,9 @@ Rota: ${url}`;
   }
 
   function editTeamMember(id) {
-    if (!canManageTeam()) return toast("Somente gestor/dono pode editar funcionÃ¡rios.", "danger");
+    if (!canManageTeam()) return toast("Somente gestor/dono pode editar funcionários.", "danger");
     const user = state.users[id];
-    if (!user) return toast("FuncionÃ¡rio nÃ£o encontrado.", "danger");
+    if (!user) return toast("Funcionário não encontrado.", "danger");
     state.editingUserId = id;
     showView("equipe");
     setValue("teamName", user.nome || "");
@@ -2236,18 +2336,18 @@ Rota: ${url}`;
     setValue("teamPass", "");
     if ($("teamEmail")) $("teamEmail").readOnly = true;
     if ($("teamPass")) $("teamPass").placeholder = "deixe em branco para manter";
-    setSubmitText("teamForm", "Salvar alteraÃ§Ãµes do funcionÃ¡rio");
+    setSubmitText("teamForm", "Salvar alterações do funcionário");
     if ($("teamCancelEdit")) $("teamCancelEdit").classList.remove("hidden");
-    toast("Edite o funcionÃ¡rio e salve as alteraÃ§Ãµes.", "ok");
+    toast("Edite o funcionário e salve as alterações.", "ok");
   }
 
   async function deleteTeamMember(id) {
-    if (!canManageTeam()) return toast("Somente gestor/dono pode excluir funcionÃ¡rios.", "danger");
-    if (id === state.user?.uid) return toast("VocÃª nÃ£o pode excluir o prÃ³prio usuÃ¡rio logado.", "danger");
+    if (!canManageTeam()) return toast("Somente gestor/dono pode excluir funcionários.", "danger");
+    if (id === state.user?.uid) return toast("Você não pode excluir o próprio usuário logado.", "danger");
     const user = state.users[id];
-    if (!user) return toast("FuncionÃ¡rio nÃ£o encontrado.", "danger");
+    if (!user) return toast("Funcionário não encontrado.", "danger");
     const email = String(user.email || "").toLowerCase().trim();
-    const reason = window.prompt(`Motivo para excluir ${user.nome || email || "este funcionÃ¡rio"} do painel JM:`, "Desligamento da equipe");
+    const reason = window.prompt(`Motivo para excluir ${user.nome || email || "este funcionário"} do painel JM:`, "Desligamento da equipe");
     if (reason === null) return;
     await writeAudit("delete", "users", id, user, reason);
     const batch = db.batch();
@@ -2264,7 +2364,7 @@ Rota: ${url}`;
     }
     await batch.commit();
     if (state.editingUserId === id) resetTeamForm();
-    toast("FuncionÃ¡rio removido do painel. Remova o Auth manualmente ou por Cloud Function quando disponÃ­vel.", "ok");
+    toast("Funcionário removido do painel. Remova o Auth manualmente ou por Cloud Function quando disponível.", "ok");
   }
 
   $("teamForm").onsubmit = async (e) => {
@@ -2277,12 +2377,12 @@ Rota: ${url}`;
     const isOfficeRole = roleCanAccessJM(selectedRole);
     const editingId = state.editingUserId;
 
-    if (!isDriverRole && !isOfficeRole) return toast("Perfil invÃ¡lido.", "danger");
+    if (!isDriverRole && !isOfficeRole) return toast("Perfil inválido.", "danger");
     if (isDriverRole && await emailReservedForManager(email)) {
-      return toast("Este e-mail estÃ¡ liberado como gestor/equipe interna. Ele nÃ£o pode ser salvo como motorista.", "danger");
+      return toast("Este e-mail está liberado como gestor/equipe interna. Ele não pode ser salvo como motorista.", "danger");
     }
-    if (!editingId && !pass) return toast("Informe uma senha inicial para criar o usuÃ¡rio no Firebase Auth.", "danger");
-    if (editingId && pass) return toast("Senha de usuÃ¡rio existente deve ser redefinida no Firebase Authentication.", "danger");
+    if (!editingId && !pass) return toast("Informe uma senha inicial para criar o usuário no Firebase Auth.", "danger");
+    if (editingId && pass) return toast("Senha de usuário existente deve ser redefinida no Firebase Authentication.", "danger");
 
     let uid = editingId || uidSafe(email);
     if (pass) {
@@ -2338,7 +2438,7 @@ Rota: ${url}`;
       const vehicle = state.vehicles[c.vehicleId] || {};
       const url = c.routeExternalUrl || c.routeUrl || mapsRouteUrl(c, vehicle);
       const metric = c.routeDistanceText || (routeKm(c, vehicle) ? routeKm(c, vehicle).toFixed(1).replace(".", ",") + " km" : "Sem rota");
-      return `<div class="card" style="margin-bottom:12px"><div class="actions"><div><b>${esc(c.protocolo || c.cliente)}</b><br><span class="muted small">${esc(c.originLabel || "")} â†’ ${esc(c.destLabel || "")}</span></div><span class="badge ${statusClass(c.status)}">${esc(c.status || "")}</span></div><p>${esc(c.notes || "")}</p><p><b>${esc(metric)}</b></p>${url ? `<a class="btn primary" target="_blank" href="${esc(url)}">Abrir rota</a>` : ""}</div>`;
+      return `<div class="card" style="margin-bottom:12px"><div class="actions"><div><b>${esc(c.protocolo || c.cliente)}</b><br><span class="muted small">${esc(c.originLabel || "")} → ${esc(c.destLabel || "")}</span></div><span class="badge ${statusClass(c.status)}">${esc(c.status || "")}</span></div><p>${esc(c.notes || "")}</p><p><b>${esc(metric)}</b></p>${url ? `<a class="btn primary" target="_blank" href="${esc(url)}">Abrir rota</a>` : ""}</div>`;
     }).join("") : `<p class="muted">Nenhum chamado.</p>`;
   }
 
@@ -2365,61 +2465,62 @@ Rota: ${url}`;
       data.insuranceProtocol = call.insuranceProtocol || "";
     }
     if (isVehicleCostType(data.type, data.notes) && !data.vehicleId) {
-      return toast("Despesa de frota precisa estar vinculada a um veÃ­culo. Selecione o caminhÃ£o/guincho antes de enviar.", "danger");
+      return toast("Despesa de frota precisa estar vinculada a um veículo. Selecione o caminhão/guincho antes de enviar.", "danger");
     }
     data.vehicleCost = !!data.vehicleId;
     data.vehicleCostKind = vehicleCostKind(data.type, data.notes);
     data.vehicleCostCategory = data.type || "Despesa motorista";
     await db.collection("expenses").add(data);
     e.target.reset();
-    toast("Despesa enviada para aprovaÃ§Ã£o jÃ¡ vinculada ao chamado/veÃ­culo.", "ok");
+    toast("Despesa enviada para aprovação já vinculada ao chamado/veículo.", "ok");
   });
 
   function renderFinance() {
     if (!$("financeTable")) return;
     if (!canManageFinance()) {
-      $("financeTable").innerHTML = `<p class="muted">Financeiro disponÃ­vel somente para gestor/dono e perfil financeiro.</p>`;
+      $("financeTable").innerHTML = `<p class="muted">Financeiro disponível somente para gestor/dono e perfil financeiro.</p>`;
       if ($("expenseApproval")) $("expenseApproval").innerHTML = "";
       return;
     }
     const rows = visibleRows(state.transactions).sort((a, b) => String(b.createdAt || b.date || "").localeCompare(String(a.createdAt || a.date || "")));
-    const entradas = rows.filter((t) => t.type === "entrada" && t.module !== "payments_shadow").reduce((s, t) => s + Number(t.amount || 0), 0);
+    const entradas = rows.filter((t) => t.type === "entrada" && t.module !== "payments_shadow").reduce((s, t) => s + revenueValueForTotals(t, rows), 0);
     const saidas = rows.filter((t) => t.type === "saida").reduce((s, t) => s + Number(t.amount || 0), 0);
     const toBill = visibleRows(state.calls).filter((c) => Number(c.valor || 0) > 0 && (isFinalStatus(c.statusKey || c.status) || /faturar|receber/i.test(String(c.billingStatus || ""))) && !c.receivableTransactionId);
-    const billingQueue = toBill.length ? `<div class="workflow-box warn"><b>Chamados finalizados/a faturar sem financeiro oficial</b><div class="table-wrap"><table><thead><tr><th>Chamado</th><th>Cliente/seguradora</th><th>VeÃ­culo</th><th>Valor</th><th>AÃ§Ã£o</th></tr></thead><tbody>${toBill.map((c) => {
+    const billingQueue = toBill.length ? `<div class="workflow-box warn"><b>Chamados finalizados/a faturar sem financeiro oficial</b><div class="table-wrap"><table><thead><tr><th>Chamado</th><th>Cliente/seguradora</th><th>Veículo</th><th>Valor</th><th>Ação</th></tr></thead><tbody>${toBill.map((c) => {
       const vehicle = state.vehicles[c.vehicleId] || {};
-      return `<tr><td>${esc(c.protocolo || c.id)}</td><td>${esc(callDisplayName(c))}</td><td>${esc(vehicle.placa || c.vehicleId || "-")}</td><td><b>${money(c.valor || 0)}</b></td><td><button class="btn good" onclick="JM.app.generateCallReceivable('${esc(c.id)}')">Gerar cobranÃ§a</button></td></tr>`;
+      return `<tr><td>${esc(c.protocolo || c.id)}</td><td>${esc(callDisplayName(c))}</td><td>${esc(vehicle.placa || c.vehicleId || "-")}</td><td><b>${money(c.valor || 0)}</b></td><td><button class="btn good" onclick="JM.app.generateCallReceivable('${esc(c.id)}')">Gerar cobrança</button></td></tr>`;
     }).join("")}</tbody></table></div></div>` : "";
-    $("financeTable").innerHTML = `<div class="finance-summary"><span>Receitas <b>${money(entradas)}</b></span><span>Despesas <b>${money(saidas)}</b></span><span>Lucro bruto <b>${money(entradas - saidas)}</b></span></div>${billingQueue}<table><thead><tr><th>Data</th><th>Tipo</th><th>DescriÃ§Ã£o</th><th>VÃ­nculos</th><th>Status</th><th>Valor</th><th>AÃ§Ãµes</th></tr></thead><tbody>` +
+    $("financeTable").innerHTML = `<div class="finance-summary"><span>Receitas <b>${money(entradas)}</b></span><span>Despesas <b>${money(saidas)}</b></span><span>Lucro bruto <b>${money(entradas - saidas)}</b></span></div>${billingQueue}<table><thead><tr><th>Data</th><th>Tipo</th><th>Descrição</th><th>Vínculos</th><th>Status</th><th>Valor</th><th>Ações</th></tr></thead><tbody>` +
       rows.map((t) => {
         const call = state.calls[t.callId] || {};
         const vehicle = state.vehicles[t.vehicleId] || {};
         const driver = state.users[t.driverId] || {};
-        const paidLine = t.paidAmount != null || t.balanceAmount != null ? `<br><span class="muted small">Pago ${money(t.paidAmount || 0)} Â· Saldo ${money(t.balanceAmount || 0)}</span>` : "";
-        return `<tr><td>${esc(t.date || dateTime(t.createdAt))}<br><span class="muted small">${esc(t.module || t.sourceType || "manual")}</span></td><td>${esc(t.type || "")}</td><td>${esc(t.description || "")}<br><span class="muted small">${esc(t.category || "")}</span></td><td><span class="muted small">${esc(call.protocolo || t.protocol || t.callId || "Sem chamado")}<br>${esc(vehicle.placa || t.vehicleId || "Sem veÃ­culo")}<br>${esc(driver.nome || t.driverName || t.driverId || "")}</span></td><td>${esc(t.status || "")}${paidLine}</td><td><b>${money(t.amount || 0)}</b></td><td class="row-actions"><button class="btn" onclick="JM.app.editTransaction('${esc(t.id)}')">Editar</button><button class="btn danger" onclick="JM.app.deleteTransaction('${esc(t.id)}')">Excluir</button></td></tr>`;
+        const paidLine = t.paidAmount != null || t.balanceAmount != null ? `<br><span class="muted small">Pago ${money(t.paidAmount || 0)} · Saldo ${money(t.balanceAmount || 0)}</span>` : "";
+        return `<tr><td>${esc(t.date || dateTime(t.createdAt))}<br><span class="muted small">${esc(t.module || t.sourceType || "manual")}</span></td><td>${esc(t.type || "")}</td><td>${esc(t.description || "")}<br><span class="muted small">${esc(t.category || "")}</span></td><td><span class="muted small">${esc(call.protocolo || t.protocol || t.callId || "Sem chamado")}<br>${esc(vehicle.placa || t.vehicleId || "Sem veículo")}<br>${esc(driver.nome || t.driverName || t.driverId || "")}</span></td><td>${esc(t.status || "")}${paidLine}</td><td><b>${money(t.amount || 0)}</b></td><td class="row-actions"><button class="btn" onclick="JM.app.editTransaction('${esc(t.id)}')">Editar</button><button class="btn danger" onclick="JM.app.deleteTransaction('${esc(t.id)}')">Excluir</button></td></tr>`;
       }).join("") +
       `</tbody></table>${reportSignature()}`;
     const pending = visibleRows(state.expenses).filter((e) => e.status === "pendente");
-    $("expenseApproval").innerHTML = pending.length ? `<table><thead><tr><th>Motorista</th><th>VÃ­nculos</th><th>Tipo</th><th>Valor</th><th>Obs</th><th>AÃ§Ãµes</th></tr></thead><tbody>` +
+    $("expenseApproval").innerHTML = pending.length ? `<table><thead><tr><th>Motorista</th><th>Vínculos</th><th>Tipo</th><th>Valor</th><th>Obs</th><th>Ações</th></tr></thead><tbody>` +
       pending.map((e) => {
         const call = state.calls[e.callId] || {};
         const vehicle = state.vehicles[e.vehicleId || call.vehicleId] || {};
         return `<tr>
-        <td>${esc(e.driverName || e.driverId)}</td><td><span class="muted small">${esc(call.protocolo || e.protocol || e.callId || "Sem chamado")}<br>${esc(vehicle.placa || e.vehicleId || "Sem veÃ­culo")}<br>${esc(e.billingParty || callDisplayName(call) || "")}</span></td><td>${esc(e.type || "")}</td><td><b>${money(e.amount || 0)}</b></td>
+        <td>${esc(e.driverName || e.driverId)}</td><td><span class="muted small">${esc(call.protocolo || e.protocol || e.callId || "Sem chamado")}<br>${esc(vehicle.placa || e.vehicleId || "Sem veículo")}<br>${esc(e.billingParty || callDisplayName(call) || "")}</span></td><td>${esc(e.type || "")}</td><td><b>${money(e.amount || 0)}</b></td>
         <td>${esc(e.notes || "")}${e.photoUrl ? `<br><a class="info" href="${esc(e.photoUrl)}" target="_blank">Comprovante</a>` : ""}</td>
         <td><button class="btn good" onclick="JM.app.approveExpense('${esc(e.id)}')">Aprovar</button><button class="btn danger" onclick="JM.app.rejectExpense('${esc(e.id)}')">Reprovar</button></td>
       </tr>`;
-      }).join("") + `</tbody></table>` : `<p class="muted">Sem despesas pendentes de aprovaÃ§Ã£o.</p>`;
+      }).join("") + `</tbody></table>` : `<p class="muted">Sem despesas pendentes de aprovação.</p>`;
   }
 
   $("financeForm").onsubmit = async (e) => {
     e.preventDefault();
-    if (!canManageFinance()) return toast("Somente gestor/dono ou financeiro pode lanÃ§ar.", "danger");
+    const submit = e.submitter || document.querySelector("#financeForm button[type='submit']");
+    if (!canManageFinance()) return toast("Somente gestor/dono ou financeiro pode lançar.", "danger");
     const callId = $("finCall") ? $("finCall").value : "";
     const call = callId ? await getDocData("calls", callId, state.calls) : null;
     let payload = {
       type: $("finType").value,
-      date: $("finDate").value,
+      date: $("finDate").value || todayInput(),
       description: $("finDesc").value.trim(),
       amount: parseMoney($("finAmount").value),
       status: $("finStatus").value,
@@ -2434,23 +2535,41 @@ Rota: ${url}`;
       updatedBy: state.user.uid
     };
     payload = enrichFinancialPayloadFromCall(payload, call);
-    let savedId = state.editingTransactionId;
-    if (savedId) {
-      await db.collection("transactions").doc(savedId).set(payload, { merge: true });
-      toast("LanÃ§amento atualizado e vÃ­nculos recalculados.", "ok");
-    } else {
-      const ref = await db.collection("transactions").add(Object.assign({ createdAt: new Date().toISOString(), createdBy: state.user.uid }, payload));
-      savedId = ref.id;
-      toast("LanÃ§amento salvo e vinculado automaticamente.", "ok");
+    if (payload.amount <= 0) return toast("Informe um valor financeiro válido.", "danger");
+    setButtonBusy(submit, true, "Salvando...");
+    try {
+      let savedId = state.editingTransactionId;
+      const current = savedId && state.transactions[savedId] || null;
+      if (payload.callId && payload.type === "entrada" && (!current || isCallReceivableTx(current))) {
+        savedId = await upsertCallReceivable(payload.callId, {
+          date: payload.date,
+          dueDate: payload.dueDate || payload.date,
+          description: payload.description || undefined,
+          amount: payload.amount,
+          paidAmount: statusMeansReceived(payload.status) ? payload.amount : 0,
+          status: payload.status,
+          category: payload.category || "Receita de chamado"
+        });
+        toast("Conta a receber do chamado salva sem criar lançamento duplicado.", "ok");
+      } else if (savedId) {
+        await db.collection("transactions").doc(savedId).set(payload, { merge: true });
+        toast("Lançamento atualizado e vínculos recalculados.", "ok");
+      } else {
+        const ref = await db.collection("transactions").add(Object.assign({ createdAt: new Date().toISOString(), createdBy: state.user.uid }, payload));
+        savedId = ref.id;
+        toast("Lançamento salvo e vinculado automaticamente.", "ok");
+      }
+      if (payload.callId) await recalculateCallFinancials(payload.callId);
+      resetFinanceForm();
+    } finally {
+      setButtonBusy(submit, false);
     }
-    if (payload.callId) await recalculateCallFinancials(payload.callId);
-    resetFinanceForm();
   };
 
   function renderPayments() {
     if (!$("paymentsTable")) return;
     if (!canManageFinance()) {
-      $("paymentsTable").innerHTML = `<p class="muted">GestÃ£o de pagamentos disponÃ­vel somente para gestor/dono e financeiro.</p>`;
+      $("paymentsTable").innerHTML = `<p class="muted">Gestão de pagamentos disponível somente para gestor/dono e financeiro.</p>`;
       return;
     }
     const rows = visibleRows(state.transactions)
@@ -2462,13 +2581,13 @@ Rota: ${url}`;
     const vencidos = rows.filter((t) => t.type === "entrada" && !statusMeansReceived(t.status) && t.dueDate && t.dueDate < today).reduce((s, t) => s + Number(t.balanceAmount != null ? t.balanceAmount : t.amount || 0), 0);
     const glosados = rows.filter((t) => /glos/i.test(String(t.status || ""))).reduce((s, t) => s + Number(t.amount || 0), 0);
     $("paymentsSummary").innerHTML = `<div class="finance-summary"><span>A receber <b>${money(receber)}</b></span><span>A pagar <b>${money(pagar)}</b></span><span>Vencidos <b>${money(vencidos)}</b></span><span>Glosados <b>${money(glosados)}</b></span><span>Registros <b>${rows.length}</b></span></div>`;
-    $("paymentsTable").innerHTML = rows.length ? `<table><thead><tr><th>Vencimento</th><th>Cliente/seguradora</th><th>Documento</th><th>Status</th><th>Valor</th><th>AÃ§Ãµes</th></tr></thead><tbody>` + rows.map((p) => {
+    $("paymentsTable").innerHTML = rows.length ? `<table><thead><tr><th>Vencimento</th><th>Cliente/seguradora</th><th>Documento</th><th>Status</th><th>Valor</th><th>Ações</th></tr></thead><tbody>` + rows.map((p) => {
       const customer = state.customers[p.customerId] || {};
       return `<tr>
         <td>${esc(p.dueDate || p.date || "")}<br><span class="muted small">${esc(p.paymentMethod || "")}</span></td>
         <td><b>${esc(customer.name || p.billingParty || "")}</b><br><span class="muted small">${esc(p.category || "")}</span></td>
         <td>${esc(p.invoiceNumber || p.description || "")}<br><span class="muted small">${esc(p.callId || "")}</span></td>
-        <td><span class="badge ${statusMeansReceived(p.status) ? "ok" : "warn"}">${esc(p.status || "")}</span>${p.paidAmount != null || p.balanceAmount != null ? `<br><span class="muted small">Pago ${money(p.paidAmount || 0)} Â· Saldo ${money(p.balanceAmount || 0)}</span>` : ""}</td>
+        <td><span class="badge ${statusMeansReceived(p.status) ? "ok" : "warn"}">${esc(p.status || "")}</span>${p.paidAmount != null || p.balanceAmount != null ? `<br><span class="muted small">Pago ${money(p.paidAmount || 0)} · Saldo ${money(p.balanceAmount || 0)}</span>` : ""}</td>
         <td><b>${money(p.amount || 0)}</b></td>
         <td class="row-actions"><button class="btn" onclick="JM.app.editPayment('${esc(p.id)}')">Editar</button><button class="btn danger" onclick="JM.app.deleteTransaction('${esc(p.id)}')">Excluir</button></td>
       </tr>`;
@@ -2499,11 +2618,12 @@ Rota: ${url}`;
     if (!$("finDesc").value) setValue("finDesc", `Chamado ${callProtocolLabel(call, callId)} - ${callDisplayName(call)}`);
     if (!$("finCategory").value) setValue("finCategory", call.insurance ? "Seguradora" : "Receita de chamado");
     if (!parseMoney($("finAmount").value)) setValue("finAmount", call.valor || "");
-    toast("Chamado vinculado: veÃ­culo, motorista e cliente preenchidos.", "ok");
+    toast("Chamado vinculado: veículo, motorista e cliente preenchidos.", "ok");
   }
 
   $("paymentForm") && ($("paymentForm").onsubmit = async (e) => {
     e.preventDefault();
+    const submit = e.submitter || document.querySelector("#paymentForm button[type='submit']");
     if (!canManageFinance()) return toast("Somente gestor/dono ou financeiro pode gerir pagamentos.", "danger");
     const customer = $("payCustomer").value ? state.customers[$("payCustomer").value] || null : null;
     const callId = $("payCall").value;
@@ -2528,38 +2648,49 @@ Rota: ${url}`;
     };
     payload = enrichFinancialPayloadFromCall(payload, call);
     if (!payload.billingParty && !payload.customerId && !payload.callId) return toast("Selecione ou informe quem vai pagar/receber.", "danger");
-
-    if (payload.callId && payload.type === "entrada") {
-      const txId = await upsertCallReceivable(payload.callId, {
-        date: payload.date,
-        dueDate: payload.dueDate,
-        description: payload.description || undefined,
-        amount: payload.amount,
-        paidAmount: statusMeansReceived(payload.status) ? payload.amount : 0,
-        status: payload.status,
-        paymentMethod: payload.paymentMethod,
-        invoiceNumber: payload.invoiceNumber,
-        category: payload.category || "Receita de chamado"
-      });
-      state.editingPaymentId = txId || state.editingPaymentId;
-      toast("Recebimento salvo no financeiro e no chamado, sem lanÃ§ar duas vezes.", "ok");
-    } else if (state.editingPaymentId) {
-      await db.collection("transactions").doc(state.editingPaymentId).set(payload, { merge: true });
-      if (payload.callId) await recalculateCallFinancials(payload.callId);
-      toast("Pagamento atualizado e vÃ­nculos recalculados.", "ok");
-    } else {
-      const ref = await db.collection("transactions").add(Object.assign({ createdAt: new Date().toISOString(), createdBy: state.user.uid }, payload));
-      if (payload.callId) await recalculateCallFinancials(payload.callId);
-      state.editingPaymentId = ref.id;
-      toast("Pagamento cadastrado e vinculado automaticamente.", "ok");
+    if (payload.amount <= 0) return toast("Informe um valor de pagamento válido.", "danger");
+    setButtonBusy(submit, true, "Salvando...");
+    try {
+      const current = state.editingPaymentId && state.transactions[state.editingPaymentId] || null;
+      if (payload.callId && payload.type === "entrada") {
+        if (current && isCallReceivableTx(current) && !statusMeansReceived(payload.status)) {
+          await upsertCallReceivable(payload.callId, {
+            date: payload.date,
+            dueDate: payload.dueDate,
+            description: payload.description || undefined,
+            amount: payload.amount,
+            paidAmount: 0,
+            status: payload.status || "A receber",
+            paymentMethod: payload.paymentMethod,
+            invoiceNumber: payload.invoiceNumber,
+            category: payload.category || "Receita de chamado"
+          });
+          toast("Cobrança do chamado atualizada.", "ok");
+        } else {
+          const receiptId = await createOrUpdatePaymentReceipt(payload.callId, payload, state.editingPaymentId);
+          state.editingPaymentId = receiptId || state.editingPaymentId;
+          toast("Recebimento registrado como baixa do chamado, mantendo histórico de parcelas.", "ok");
+        }
+      } else if (state.editingPaymentId) {
+        await db.collection("transactions").doc(state.editingPaymentId).set(payload, { merge: true });
+        if (payload.callId) await recalculateCallFinancials(payload.callId);
+        toast("Pagamento atualizado e vínculos recalculados.", "ok");
+      } else {
+        const ref = await db.collection("transactions").add(Object.assign({ createdAt: new Date().toISOString(), createdBy: state.user.uid }, payload));
+        if (payload.callId) await recalculateCallFinancials(payload.callId);
+        state.editingPaymentId = ref.id;
+        toast("Pagamento cadastrado e vinculado automaticamente.", "ok");
+      }
+      resetPaymentForm();
+    } finally {
+      setButtonBusy(submit, false);
     }
-    resetPaymentForm();
   });
 
   async function generateCallReceivable(id) {
-    if (!canManageFinance()) return toast("Somente gestor/dono ou financeiro pode gerar cobranÃ§a.", "danger");
+    if (!canManageFinance()) return toast("Somente gestor/dono ou financeiro pode gerar cobrança.", "danger");
     const txId = await upsertCallReceivable(id, { status: "A receber" });
-    if (txId) toast("CobranÃ§a do chamado gerada no financeiro e em pagamentos.", "ok");
+    if (txId) toast("Cobrança do chamado gerada no financeiro e em pagamentos.", "ok");
   }
 
   function editPayment(id) {
@@ -2579,14 +2710,14 @@ Rota: ${url}`;
     setValue("payMethod", tx.paymentMethod || "PIX");
     setValue("payStatus", tx.status || "A receber");
     setValue("payAmount", tx.amount || "");
-    setSubmitText("paymentForm", "Salvar alteraÃ§Ãµes do pagamento");
+    setSubmitText("paymentForm", "Salvar alterações do pagamento");
     if ($("paymentCancelEdit")) $("paymentCancelEdit").classList.remove("hidden");
   }
 
   function editTransaction(id) {
-    if (!canManageFinance()) return toast("Sem permissÃ£o para editar financeiro.", "danger");
+    if (!canManageFinance()) return toast("Sem permissão para editar financeiro.", "danger");
     const tx = state.transactions[id];
-    if (!tx) return toast("LanÃ§amento nÃ£o encontrado.", "danger");
+    if (!tx) return toast("Lançamento não encontrado.", "danger");
     state.editingTransactionId = id;
     setValue("finType", tx.type || "entrada");
     setValue("finDate", tx.date || todayInput());
@@ -2598,28 +2729,28 @@ Rota: ${url}`;
     setValue("finCall", tx.callId || "");
     setValue("finVehicle", tx.vehicleId || "");
     setValue("finDriver", tx.driverId || "");
-    setSubmitText("financeForm", "Salvar alteraÃ§Ãµes financeiras");
+    setSubmitText("financeForm", "Salvar alterações financeiras");
     if ($("financeCancelEdit")) $("financeCancelEdit").classList.remove("hidden");
   }
 
   async function deleteTransaction(id) {
     if (!canOwnCompany()) return toast("Somente gestor/dono pode excluir financeiro.", "danger");
     const tx = state.transactions[id];
-    if (!tx) return toast("LanÃ§amento nÃ£o encontrado.", "danger");
-    const reason = window.prompt("Motivo para excluir o lanÃ§amento financeiro:", "CorreÃ§Ã£o financeira");
+    if (!tx) return toast("Lançamento não encontrado.", "danger");
+    const reason = window.prompt("Motivo para excluir o lançamento financeiro:", "Correção financeira");
     if (reason === null) return;
     await softDeleteDoc("transactions", id, tx, reason);
     if (tx.callId) await recalculateCallFinancials(tx.callId);
     if (state.editingTransactionId === id) resetFinanceForm();
     if (state.editingPaymentId === id) resetPaymentForm();
-    toast("LanÃ§amento removido do painel com auditoria e vÃ­nculos recalculados.", "ok");
+    toast("Lançamento removido do painel com auditoria e vínculos recalculados.", "ok");
   }
 
   async function approveExpense(id) {
     const expense = state.expenses[id];
     if (!expense || !canManageFinance()) return;
     await upsertTransactionFromExpense(id, expense);
-    toast("Despesa aprovada, vinculada ao chamado/veÃ­culo e refletida no financeiro.", "ok");
+    toast("Despesa aprovada, vinculada ao chamado/veículo e refletida no financeiro.", "ok");
   }
 
   async function rejectExpense(id) {

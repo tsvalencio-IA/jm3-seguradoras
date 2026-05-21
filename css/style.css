@@ -533,3 +533,50 @@ td { font-size: .88rem; }
   .dossier-head { flex-direction: column; }
   .panel-collapse-toggle { min-width: 112px; }
 }
+
+/* JM v19 - polimento mobile/PC: tabelas viram cards operacionais em telas pequenas */
+.workflow-box {
+  border: 1px solid rgba(245, 158, 11, .35);
+  border-radius: var(--radius);
+  background: rgba(245, 158, 11, .08);
+  padding: 12px;
+  margin: 10px 0 14px;
+}
+.workflow-box.warn { border-color: rgba(245, 158, 11, .45); }
+.workflow-box.ok { border-color: rgba(34, 197, 94, .45); background: rgba(34, 197, 94, .08); }
+.workflow-box.danger { border-color: rgba(239, 68, 68, .45); background: rgba(239, 68, 68, .08); }
+
+@media (max-width: 720px) {
+  body { -webkit-text-size-adjust: 100%; }
+  .content { padding: 10px; }
+  .panel, .card { padding: 12px; border-radius: 12px; }
+  h2 { font-size: .92rem; line-height: 1.25; }
+  input, select, textarea { min-height: 46px; font-size: 16px; }
+  .btn { min-height: 44px; padding: 11px 12px; font-size: .72rem; }
+  .actions { align-items: stretch; }
+  .actions .btn, .actions a.btn { flex: 1 1 100%; }
+  .topbar { align-items: flex-start; }
+  .topbar .actions { width: 100%; }
+  .table-wrap { overflow-x: visible; }
+  table { min-width: 0; border-collapse: separate; border-spacing: 0 10px; }
+  table thead { display: none; }
+  table, tbody, tr, td { display: block; width: 100%; }
+  tr {
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    background: rgba(255,255,255,.025);
+    padding: 8px;
+  }
+  td {
+    border: 0;
+    padding: 8px 6px;
+    font-size: .88rem;
+  }
+  td + td { border-top: 1px dashed rgba(148, 163, 184, .18); }
+  td.row-actions, .row-actions { display: flex; flex-direction: column; gap: 8px; }
+  td.row-actions .btn, .row-actions .btn { width: 100%; justify-content: center; }
+  .finance-summary { display: grid; grid-template-columns: 1fr; }
+  .finance-summary span { width: 100%; }
+  .map { min-height: 340px; height: 58vh; }
+  .signature-pad { width: 100%; max-width: 100%; touch-action: none; }
+}

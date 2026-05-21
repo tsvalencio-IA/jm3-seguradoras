@@ -1,4 +1,4 @@
-﻿const CACHE_NAME = "jm-guinchos-v18-1-gps-endereco-paineis";
+const CACHE_NAME = "jm-guinchos-v19-polimento-fluxo-mobile";
 const ASSETS = [
   "./",
   "./index.html",
