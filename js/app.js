@@ -35,6 +35,7 @@
     operationInsuranceFilter: "",
     operationDriverFilter: "",
     operationVehicleFilter: "",
+    pendingIntegrationId: null,
     editingCallId: null,
     editingUserId: null,
     editingTransactionId: null,
@@ -306,6 +307,35 @@
 
   function callProtocolLabel(call, fallbackId) {
     return call && (call.protocolo || call.insuranceProtocol || call.id) || fallbackId || "";
+  }
+
+  const REQUIRED_PROOF_PHOTOS = ["front", "rear", "right", "left", "dashboard", "damage", "final"];
+  const REQUIRED_PROOF_STAGES = ["retirada", "carregamento", "transporte", "entrega", "finalizacao"];
+
+  function proofPhotos(call) {
+    return Array.isArray(call && call.proofPhotos) ? call.proofPhotos.filter(Boolean) : [];
+  }
+
+  function callProofComplete(call) {
+    const checklist = call && call.proofChecklist || {};
+    const signature = call && call.customerSignature || {};
+    const hasChecklist = REQUIRED_PROOF_STAGES.every((stage) => checklist[stage] && checklist[stage].status && checklist[stage].status !== "pendente");
+    const hasPhotos = REQUIRED_PROOF_PHOTOS.every((type) => proofPhotos(call).some((photo) => photo.type === type && photo.cloudinaryUrl));
+    const hasSignature = !!((signature.signatureUrl || signature.cloudinaryUrl) && signature.acceptedText);
+    return hasChecklist && hasPhotos && hasSignature;
+  }
+
+  function proofStatus(call) {
+    if (call && call.proofStatus === "revisado") return "revisado";
+    if (callProofComplete(call)) return "completo";
+    if (call && (proofPhotos(call).length || call.proofChecklist || call.customerSignature)) return "parcial";
+    return "pendente";
+  }
+
+  function proofStatusBadge(call) {
+    const status = proofStatus(call);
+    const cls = status === "revisado" || status === "completo" ? "ok" : status === "parcial" ? "warn" : "danger";
+    return `<span class="badge ${cls}">Provas: ${esc(status)}</span>`;
   }
 
   function enrichFinancialPayloadFromCall(payload, call) {
@@ -866,6 +896,7 @@
   function resetCallForm() {
     if ($("callForm")) $("callForm").reset();
     state.editingCallId = null;
+    state.pendingIntegrationId = null;
     state.addresses = { origin: null, destination: null, waypoints: [] };
     state.smartRoute = null;
     setSubmitText("callForm", "Registrar chamado");
@@ -1336,7 +1367,7 @@
           <button class="btn good" type="button" onclick="event.stopPropagation();JM.app.setCallStatus('${esc(c.id)}','finalizado')">Finalizar</button>
           ${wa ? `<a class="btn" href="${esc(wa)}" target="_blank" onclick="event.stopPropagation()">WhatsApp</a>` : ""}
         </div>
-        <div>${routeOk ? '<span class="badge ok">Rota por ruas</span>' : '<span class="badge warn">Rota estimada</span>'} <span class="badge ${sla.className}">${esc(sla.label)}</span> ${String(c.priority).toLowerCase() === 'urgente' ? '<span class="badge danger">Urgente</span>' : ''}</div>
+        <div>${routeOk ? '<span class="badge ok">Rota por ruas</span>' : '<span class="badge warn">Rota estimada</span>'} <span class="badge ${sla.className}">${esc(sla.label)}</span> ${proofStatusBadge(c)} ${String(c.priority).toLowerCase() === 'urgente' ? '<span class="badge danger">Urgente</span>' : ''}</div>
       </div>`;
     }).join("") : `<p class="muted">Nenhum chamado no filtro selecionado.</p>`;
 
@@ -1430,6 +1461,8 @@ Rota: ${url}`;
       const metric = c.routeDistanceText || c.routeMetrics && c.routeMetrics.fullRoute && c.routeMetrics.fullRoute.distanceText || c.routeMetrics && c.routeMetrics.bestToOrigin && c.routeMetrics.bestToOrigin.distanceText || (km ? km.toFixed(1).replace(".", ",") + " km" : "Sem rota");
       const routeBadge = c.routePrecision === "osrm_openstreetmap" || c.routeMetrics && c.routeMetrics.fullRoute && c.routeMetrics.fullRoute.isPrecise ? `<br><span class="badge ok">Rota por ruas OSM</span>` : `<br><span class="badge warn">Fallback/estimada</span>`;
       const adminActions = canOwnCompany() ? `<button class="btn" onclick="JM.app.editCall('${esc(c.id)}')">Editar</button><button class="btn danger" onclick="JM.app.deleteCall('${esc(c.id)}')">Excluir</button>` : "";
+      const viewProofActions = proofStatus(c) !== "pendente" ? `<button class="btn" onclick="JM.app.viewCallProofs('${esc(c.id)}')">Ver provas</button>` : "";
+      const proofActions = (canOwnCompany() || hasRole(["gerente"])) && proofStatus(c) === "completo" ? `<button class="btn good" onclick="JM.app.reviewCallProofs('${esc(c.id)}')">Revisar provas</button>` : "";
       const valueHtml = canSeeSensitiveFinance() ? `<br><b>${money(c.valor || 0)}</b>` : "";
       const sla = slaInfo(c);
       return `<tr>
@@ -1437,8 +1470,8 @@ Rota: ${url}`;
         <td>${esc(c.cliente || "")}<br><span class="muted small">${esc(c.phone || "")}</span><br><span class="muted small">${esc(c.source || "Particular")}${c.insurance ? " · " + esc(c.insurance) : ""}${c.insuranceProtocol ? " · Prot. " + esc(c.insuranceProtocol) : ""}</span></td>
         <td><span class="small">${esc(c.originLabel || c.origem && c.origem.label || "-")}</span><br><span class="muted small">→ ${esc(c.destLabel || c.destino && c.destino.label || "-")}</span><br><b>${esc(metric)}</b>${routeBadge}${url ? `<br><a class="info small" target="_blank" href="${esc(url)}">Abrir rota no Maps</a>` : ""}</td>
         <td>${esc(vehicle.placa || "-")}<br><span class="muted small">${esc(driver.nome || driver.email || "Sem motorista")}</span></td>
-        <td><span class="badge ${statusClass(c)}">${esc(operationalStatus(c))}</span>${valueHtml}<br><span class="badge ${sla.className}">${esc(sla.label)}</span></td>
-        <td class="row-actions"><button class="btn good" onclick="JM.app.setCallStatus('${esc(c.id)}','despachado')">Despachar</button><button class="btn primary" onclick="JM.app.setCallStatus('${esc(c.id)}','motorista_a_caminho')">A caminho</button><button class="btn" onclick="JM.app.setCallStatus('${esc(c.id)}','finalizado')">Finalizar</button>${adminActions}</td>
+        <td><span class="badge ${statusClass(c)}">${esc(operationalStatus(c))}</span>${valueHtml}<br><span class="badge ${sla.className}">${esc(sla.label)}</span><br>${proofStatusBadge(c)}</td>
+        <td class="row-actions"><button class="btn good" onclick="JM.app.setCallStatus('${esc(c.id)}','despachado')">Despachar</button><button class="btn primary" onclick="JM.app.setCallStatus('${esc(c.id)}','motorista_a_caminho')">A caminho</button><button class="btn" onclick="JM.app.setCallStatus('${esc(c.id)}','finalizado')">Finalizar</button>${viewProofActions}${proofActions}${adminActions}</td>
       </tr>`;
     }).join("") + `</tbody></table>`;
   }
@@ -1505,6 +1538,7 @@ Rota: ${url}`;
       routeDistanceText: best && best.fullRoute && best.fullRoute.distanceText || "",
       routeDurationText: best && best.fullRoute && best.fullRoute.durationText || "",
       routeMetrics: storeRouteMetrics(best),
+      integrationInboxId: state.pendingIntegrationId || "",
       notes: $("callNotes").value.trim()
     };
     try {
@@ -1525,7 +1559,7 @@ Rota: ${url}`;
       }
       const protocolo = "JM-" + now.replace(/\D/g, "").slice(2, 14);
       const initialKey = $("callDriver").value ? "despachado" : "aguardando_despacho";
-      await db.collection("calls").add(Object.assign({}, baseData, {
+      const callRef = await db.collection("calls").add(Object.assign({}, baseData, {
         protocolo,
         status: statusLabel(initialKey),
         statusKey: initialKey,
@@ -1533,6 +1567,15 @@ Rota: ${url}`;
         createdBy: state.user.uid,
         timeline: [{ at: now, by: personName(), text: "Chamado criado com endereço validado e rota inteligente" }]
       }));
+      if (state.pendingIntegrationId) {
+        await db.collection("integrationInbox").doc(state.pendingIntegrationId).set({
+          status: "convertido",
+          convertedCallId: callRef.id,
+          convertedAt: now,
+          convertedBy: state.user.uid
+        }, { merge: true }).catch(() => {});
+        state.pendingIntegrationId = null;
+      }
       resetCallForm();
       toast("Chamado registrado com dados de rota.", "ok");
     } finally {
@@ -1549,9 +1592,16 @@ Rota: ${url}`;
     const updates = {
       status: label,
       statusKey: key,
+      proofStatus: proofStatus(call),
       updatedAt: new Date().toISOString(),
       timeline: arrayUnion({ at: new Date().toISOString(), by: personName(), text: "Status alterado para " + label })
     };
+    if (key === "finalizado" && !callProofComplete(call)) {
+      updates.billingStatus = "aguardando_provas";
+      updates.financePending = true;
+      await db.collection("calls").doc(id).update(updates);
+      return toast("Chamado marcado como finalizado operacional, mas não ficou pronto para faturar: faltam checklist, fotos obrigatórias ou assinatura/aceite.", "warn");
+    }
     if (key === "finalizado" && Number(call.valor || 0) > 0) {
       updates.billingStatus = canManageFinance() ? "a_receber" : "a_faturar";
       updates.financePending = !canManageFinance();
@@ -1646,6 +1696,37 @@ Rota: ${url}`;
     toast("Chamado removido do painel com auditoria.", "ok");
   }
 
+  async function reviewCallProofs(id) {
+    if (!canOwnCompany() && !hasRole(["gerente"])) return toast("Somente gestor/dono ou gerente pode revisar provas.", "danger");
+    const call = state.calls[id];
+    if (!call) return toast("Chamado não encontrado.", "danger");
+    if (!callProofComplete(call)) return toast("Ainda faltam fotos obrigatórias, checklist ou assinatura/aceite.", "danger");
+    await db.collection("calls").doc(id).set({
+      proofStatus: "revisado",
+      proofReviewedAt: new Date().toISOString(),
+      proofReviewedBy: state.user.uid,
+      billingStatus: Number(call.valor || 0) > 0 ? "a_faturar" : call.billingStatus || "sem_valor",
+      timeline: arrayUnion({ at: new Date().toISOString(), by: personName(), text: "Gestão revisou provas do atendimento para faturamento" })
+    }, { merge: true });
+    toast("Provas revisadas. Chamado liberado para faturamento.", "ok");
+  }
+
+  function viewCallProofs(id) {
+    const call = state.calls[id];
+    if (!call) return toast("Chamado não encontrado.", "danger");
+    const photos = proofPhotos(call);
+    const signature = call.customerSignature || {};
+    const checklist = call.proofChecklist || {};
+    const photoHtml = photos.length ? photos.map((photo) => `<div style="break-inside:avoid;border:1px solid #d1d5db;padding:10px;margin:8px 0"><b>${esc(photo.label || photo.type || "Foto")}</b><br><a href="${esc(photo.cloudinaryUrl)}" target="_blank">${esc(photo.cloudinaryUrl)}</a><br><img src="${esc(photo.cloudinaryUrl)}" style="max-width:100%;margin-top:8px"></div>`).join("") : "<p>Sem fotos.</p>";
+    const sigUrl = signature.signatureUrl || signature.cloudinaryUrl || "";
+    const sigHtml = sigUrl ? `<p><b>Assinatura:</b> ${esc(signature.name || "")} ${esc(signature.document || "")}<br><b>Aceite:</b> ${esc(signature.acceptedText || "")}</p><img src="${esc(sigUrl)}" style="max-width:100%;border:1px solid #d1d5db">` : "<p>Sem assinatura.</p>";
+    const checklistHtml = REQUIRED_PROOF_STAGES.map((stage) => `<li><b>${esc(stage)}:</b> ${esc(checklist[stage] && checklist[stage].status || "pendente")}</li>`).join("");
+    const win = window.open("", "_blank");
+    if (!win) return toast("O navegador bloqueou a janela de provas.", "danger");
+    win.document.write(`<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><title>Provas ${esc(call.protocolo || id)}</title><style>body{font-family:Arial,sans-serif;padding:18px;color:#111827} h1{margin-bottom:4px} .muted{color:#64748b}</style></head><body><h1>Provas do atendimento ${esc(call.protocolo || id)}</h1><p class="muted">${esc(call.cliente || "")} · ${esc(call.insurance || "")} · ${esc(call.customerPlate || "")}</p><h2>Checklist</h2><ul>${checklistHtml}</ul><p>${esc(checklist.notes || "")}</p><h2>Assinatura</h2>${sigHtml}<h2>Fotos</h2>${photoHtml}</body></html>`);
+    win.document.close();
+  }
+
   function renderCustomers() {
     if (!$("customersTable")) return;
     const rows = visibleRows(state.customers).sort((a, b) => String(a.name || "").localeCompare(String(b.name || "")));
@@ -1655,7 +1736,7 @@ Rota: ${url}`;
         <td><b>${esc(c.name || c.razaoSocial || c.id)}</b><br><span class="muted small">${esc(c.document || "")}</span></td>
         <td>${esc(c.type || "")}<br><span class="muted small">${esc(c.portalUrl || "")}</span></td>
         <td>${esc(c.contactName || "")}<br><span class="muted small">${esc(c.phone || "")} ${wa ? `· <a class="info" target="_blank" href="${esc(wa)}">WhatsApp</a>` : ""}</span><br><span class="muted small">${esc(c.email || "")}</span></td>
-        <td>${esc(c.paymentTerm || "")}<br><span class="muted small">${esc(c.billingRules || "")}</span></td>
+        <td>${esc(c.paymentTerm || "")}<br><span class="badge ${c.glosaRisk === "alto" ? "danger" : c.glosaRisk === "medio" ? "warn" : "ok"}">Glosa ${esc(c.glosaRisk || "baixo")}</span><br><span class="muted small">${esc(c.billingRules || "")}</span><br><span class="muted small">${esc(c.proofRules || "")}</span></td>
         <td class="row-actions"><button class="btn" onclick="JM.app.editCustomer('${esc(c.id)}')">Editar</button><button class="btn danger" onclick="JM.app.deleteCustomer('${esc(c.id)}')">Excluir</button></td>
       </tr>`;
     }).join("") + `</tbody></table>` : `<p class="muted">Cadastre clientes particulares, empresas, seguradoras e assistências para vincular chamados e pagamentos.</p>`;
@@ -1674,8 +1755,11 @@ Rota: ${url}`;
       email: $("customerEmail").value.trim(),
       portalUrl: $("customerPortal").value.trim(),
       billingPhone: $("customerBillingPhone").value.trim(),
+      billingEmail: $("customerBillingEmail") ? $("customerBillingEmail").value.trim() : "",
       paymentTerm: $("customerPaymentTerm").value.trim(),
+      glosaRisk: $("customerGlosaRisk") ? $("customerGlosaRisk").value : "baixo",
       billingRules: $("customerBillingRules").value.trim(),
+      proofRules: $("customerProofRules") ? $("customerProofRules").value.trim() : "",
       updatedAt: now,
       updatedBy: state.user.uid
     };
@@ -1703,8 +1787,11 @@ Rota: ${url}`;
     setValue("customerEmail", c.email || "");
     setValue("customerPortal", c.portalUrl || "");
     setValue("customerBillingPhone", c.billingPhone || "");
+    setValue("customerBillingEmail", c.billingEmail || "");
     setValue("customerPaymentTerm", c.paymentTerm || "");
+    setValue("customerGlosaRisk", c.glosaRisk || "baixo");
     setValue("customerBillingRules", c.billingRules || "");
+    setValue("customerProofRules", c.proofRules || "");
     setSubmitText("customerForm", "Salvar alterações do cliente");
     if ($("customerCancelEdit")) $("customerCancelEdit").classList.remove("hidden");
   }
@@ -1724,8 +1811,8 @@ Rota: ${url}`;
     if (!$("integrationInboxTable")) return;
     const rows = visibleRows(state.integrationInbox).sort((a, b) => String(b.createdAt || "").localeCompare(String(a.createdAt || "")));
     $("integrationInboxTable").innerHTML = rows.length ? `<table><thead><tr><th>Origem</th><th>Protocolo</th><th>Cliente</th><th>Status</th><th>Ações</th></tr></thead><tbody>` + rows.map((row) => `<tr>
-      <td><b>${esc(row.sourceName || row.source || "Integração")}</b><br><span class="muted small">${dateTime(row.createdAt)}</span></td>
-      <td>${esc(row.protocol || row.externalId || "")}</td>
+      <td><b>${esc(row.sourceName || row.source || "Integração")}</b><br><span class="muted small">${esc(row.sourceType || "manual")} · ${dateTime(row.createdAt)}</span></td>
+      <td>${esc(row.protocol || row.externalId || "")}<br><span class="muted small">${esc(row.externalId || "")}</span></td>
       <td>${esc(row.customerName || "")}<br><span class="muted small">${esc(row.customerPhone || "")}</span></td>
       <td><span class="badge ${row.status === "convertido" ? "ok" : row.status === "erro" ? "danger" : "warn"}">${esc(row.status || "novo")}</span></td>
       <td class="row-actions"><button class="btn good" onclick="JM.app.applyIntegrationToCall('${esc(row.id)}')">Gerar chamado</button><button class="btn" onclick="JM.app.markIntegrationHandled('${esc(row.id)}')">Marcar tratado</button></td>
@@ -1735,12 +1822,38 @@ Rota: ${url}`;
   $("integrationForm") && ($("integrationForm").onsubmit = async (e) => {
     e.preventDefault();
     if (!canOperateCalls()) return toast("Sem permissão para registrar acionamento externo.", "danger");
-    await db.collection("integrationInbox").add({
-      sourceName: $("intSource").value.trim(),
-      protocol: $("intProtocol").value.trim(),
+    const normalizedCall = {
+      source: "Seguradora",
+      insurance: $("intSource").value.trim(),
+      insuranceProtocol: $("intProtocol").value.trim(),
+      claimNumber: $("intClaim") ? $("intClaim").value.trim() : "",
+      policyNumber: $("intPolicy") ? $("intPolicy").value.trim() : "",
       customerName: $("intCustomer").value.trim(),
       customerPhone: $("intPhone").value.trim(),
+      customerPlate: $("intPlate") ? $("intPlate").value.trim().toUpperCase() : "",
+      originText: $("intOrigin") ? $("intOrigin").value.trim() : "",
+      destinationText: $("intDestination") ? $("intDestination").value.trim() : "",
+      slaLimitAt: $("intSla") ? $("intSla").value : "",
+      rawText: $("intPayload").value.trim()
+    };
+    await db.collection("integrationInbox").add({
+      source: $("intSource").value.trim(),
+      sourceName: $("intSource").value.trim(),
+      sourceType: $("intSourceType") ? $("intSourceType").value : "manual",
+      protocol: $("intProtocol").value.trim(),
+      externalId: $("intExternalId") ? $("intExternalId").value.trim() : "",
+      customerName: $("intCustomer").value.trim(),
+      customerPhone: $("intPhone").value.trim(),
+      payload: {
+        text: $("intPayload").value.trim(),
+        origin: normalizedCall.originText,
+        destination: normalizedCall.destinationText,
+        claimNumber: normalizedCall.claimNumber,
+        policyNumber: normalizedCall.policyNumber,
+        customerPlate: normalizedCall.customerPlate
+      },
       payloadText: $("intPayload").value.trim(),
+      normalizedCall,
       status: "novo",
       createdAt: new Date().toISOString(),
       createdBy: state.user.uid
@@ -1752,15 +1865,24 @@ Rota: ${url}`;
   function applyIntegrationToCall(id) {
     const row = state.integrationInbox[id];
     if (!row) return;
+    const normalized = row.normalizedCall || {};
     showView("chamados");
-    setValue("callClient", row.customerName || "");
-    setValue("callPhone", row.customerPhone || "");
+    setValue("callClient", normalized.customerName || row.customerName || "");
+    setValue("callPhone", normalized.customerPhone || row.customerPhone || "");
     setValue("callSource", "Seguradora");
-    setValue("callInsurance", row.sourceName || "");
-    setValue("callInsuranceProtocol", row.protocol || row.externalId || "");
-    setValue("callNotes", row.payloadText || "");
+    setValue("callInsurance", normalized.insurance || row.sourceName || row.source || "");
+    setValue("callInsuranceProtocol", normalized.insuranceProtocol || row.protocol || row.externalId || "");
+    setValue("callClaim", normalized.claimNumber || "");
+    setValue("callPolicyNumber", normalized.policyNumber || "");
+    setValue("callCustomerPlate", normalized.customerPlate || "");
+    setValue("callSlaLimit", normalized.slaLimitAt || "");
+    setValue("callOriginLabel", normalized.originText || "");
+    setValue("callDestLabel", normalized.destinationText || "");
+    setValue("callNotes", normalized.rawText || row.payloadText || row.payload && row.payload.text || "");
+    state.pendingIntegrationId = id;
     db.collection("integrationInbox").doc(id).set({
       status: "em_tratamento",
+      lastAppliedToFormAt: new Date().toISOString(),
       handledAt: new Date().toISOString(),
       handledBy: state.user.uid
     }, { merge: true }).catch(() => {});
@@ -2176,7 +2298,10 @@ Rota: ${url}`;
       .sort((a, b) => String(b.dueDate || b.date || b.createdAt || "").localeCompare(String(a.dueDate || a.date || a.createdAt || "")));
     const receber = rows.filter((t) => t.type === "entrada" && !statusMeansReceived(t.status)).reduce((s, t) => s + Number(t.balanceAmount != null ? t.balanceAmount : t.amount || 0), 0);
     const pagar = rows.filter((t) => t.type === "saida" && !statusMeansReceived(t.status)).reduce((s, t) => s + Number(t.amount || 0), 0);
-    $("paymentsSummary").innerHTML = `<div class="finance-summary"><span>A receber <b>${money(receber)}</b></span><span>A pagar <b>${money(pagar)}</b></span><span>Registros <b>${rows.length}</b></span></div>`;
+    const today = todayInput();
+    const vencidos = rows.filter((t) => t.type === "entrada" && !statusMeansReceived(t.status) && t.dueDate && t.dueDate < today).reduce((s, t) => s + Number(t.balanceAmount != null ? t.balanceAmount : t.amount || 0), 0);
+    const glosados = rows.filter((t) => /glos/i.test(String(t.status || ""))).reduce((s, t) => s + Number(t.amount || 0), 0);
+    $("paymentsSummary").innerHTML = `<div class="finance-summary"><span>A receber <b>${money(receber)}</b></span><span>A pagar <b>${money(pagar)}</b></span><span>Vencidos <b>${money(vencidos)}</b></span><span>Glosados <b>${money(glosados)}</b></span><span>Registros <b>${rows.length}</b></span></div>`;
     $("paymentsTable").innerHTML = rows.length ? `<table><thead><tr><th>Vencimento</th><th>Cliente/seguradora</th><th>Documento</th><th>Status</th><th>Valor</th><th>Ações</th></tr></thead><tbody>` + rows.map((p) => {
       const customer = state.customers[p.customerId] || {};
       return `<tr>
@@ -2400,6 +2525,8 @@ Rota: ${url}`;
     copySelectedCallRoute,
     editCall,
     deleteCall,
+    viewCallProofs,
+    reviewCallProofs,
     editTeamMember,
     deleteTeamMember,
     editTransaction,

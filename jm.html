@@ -5,9 +5,9 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#07111f">
   <title>JM Guinchos - Gestor</title>
-  <link rel="manifest" href="manifest.json?v=jm-v17-fluxo-unico-financeiro-operacional">
+  <link rel="manifest" href="manifest.json?v=jm-v18-provas-assinatura-seguradoras">
   <link rel="icon" href="assets/icon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="css/style.css?v=jm-v17-fluxo-unico-financeiro-operacional">
+  <link rel="stylesheet" href="css/style.css?v=jm-v18-provas-assinatura-seguradoras">
 </head>
 <body>
   <section id="loginView" class="login">
@@ -246,8 +246,11 @@
                 <div class="wide"><label>E-mail</label><input id="customerEmail" type="email"></div>
                 <div class="wide"><label>Portal / site da seguradora</label><input id="customerPortal" placeholder="https://portal.seguradora.com.br"></div>
                 <div><label>Telefone faturamento</label><input id="customerBillingPhone" inputmode="tel"></div>
+                <div><label>E-mail faturamento</label><input id="customerBillingEmail" type="email" placeholder="notas@seguradora.com.br"></div>
                 <div><label>Prazo de pagamento</label><input id="customerPaymentTerm" placeholder="Ex: 15 dias, 30 dias, quinzenal"></div>
+                <div><label>Risco de glosa</label><select id="customerGlosaRisk"><option value="baixo">Baixo</option><option value="medio">Médio</option><option value="alto">Alto</option></select></div>
                 <div class="wide"><label>Regras de faturamento</label><textarea id="customerBillingRules" placeholder="Checklist, fotos, nota, protocolo, excedente KM, glosa, fechamento..."></textarea></div>
+                <div class="wide"><label>Exigências de provas</label><textarea id="customerProofRules" placeholder="Fotos obrigatórias, assinatura, comprovante, checklist, campos do portal e prazo de envio."></textarea></div>
                 <button class="btn primary wide" type="submit">Salvar cliente</button>
                 <button class="btn wide hidden" id="customerCancelEdit" type="button">Cancelar edição</button>
               </form>
@@ -266,9 +269,17 @@
               <p class="muted small">Fila profissional para receber chamados de seguradoras. Em produção, essa fila deve ser alimentada por webhook, e-mail parser ou robô autorizado; sem backend, use este formulário como entrada manual controlada.</p>
               <form id="integrationForm" class="form-grid">
                 <div><label>Seguradora / origem</label><input id="intSource" required placeholder="Porto, Suhai, Allianz..."></div>
+                <div><label>Tipo de entrada</label><select id="intSourceType"><option value="manual">Manual</option><option value="webhook">Webhook/API</option><option value="email_parser">E-mail parser</option><option value="portal_robot">Robô autorizado</option><option value="whatsapp">WhatsApp</option></select></div>
                 <div><label>Protocolo externo</label><input id="intProtocol" placeholder="Acionamento / OS"></div>
+                <div><label>ID externo</label><input id="intExternalId" placeholder="ID do portal/API/e-mail"></div>
                 <div><label>Cliente final</label><input id="intCustomer" placeholder="Nome do cliente"></div>
                 <div><label>WhatsApp cliente</label><input id="intPhone" inputmode="tel"></div>
+                <div><label>Sinistro</label><input id="intClaim" placeholder="Nº sinistro"></div>
+                <div><label>Apólice</label><input id="intPolicy" placeholder="Nº apólice"></div>
+                <div><label>Placa</label><input id="intPlate" placeholder="ABC1D23"></div>
+                <div><label>Prazo SLA</label><input id="intSla" type="datetime-local"></div>
+                <div class="wide"><label>Origem informada</label><input id="intOrigin" placeholder="Endereço, coordenada ou link enviado pela seguradora"></div>
+                <div class="wide"><label>Destino informado</label><input id="intDestination" placeholder="Endereço, coordenada ou link enviado pela seguradora"></div>
                 <div class="wide"><label>Texto bruto do portal/e-mail/WhatsApp</label><textarea id="intPayload" placeholder="Cole aqui o chamado recebido da seguradora para não perder informação operacional."></textarea></div>
                 <button class="btn primary wide" type="submit">Adicionar à fila</button>
               </form>
@@ -417,15 +428,15 @@
   <footer class="signature-footer">Powered by thIAguinho Soluções Digitais</footer>
   <div id="toast" class="toast"></div>
 
-  <script src="js/config.firebase.js?v=jm-v17-fluxo-unico-financeiro-operacional"></script>
+  <script src="js/config.firebase.js?v=jm-v18-provas-assinatura-seguradoras"></script>
   <script src="https://www.gstatic.com/firebasejs/10.12.5/firebase-app-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/10.12.5/firebase-auth-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/10.12.5/firebase-firestore-compat.js"></script>
-  <script src="js/utils.js?v=jm-v17-fluxo-unico-financeiro-operacional"></script>
-  <script src="js/firebase.js?v=jm-v17-fluxo-unico-financeiro-operacional"></script>
-  <script src="js/tracker.js?v=jm-v17-fluxo-unico-financeiro-operacional"></script>
-  <script src="js/google-maps.js?v=jm-v17-fluxo-unico-financeiro-operacional"></script>
-  <script src="js/mapa.js?v=jm-v17-fluxo-unico-financeiro-operacional"></script>
-  <script src="js/app.js?v=jm-v17-fluxo-unico-financeiro-operacional"></script>
+  <script src="js/utils.js?v=jm-v18-provas-assinatura-seguradoras"></script>
+  <script src="js/firebase.js?v=jm-v18-provas-assinatura-seguradoras"></script>
+  <script src="js/tracker.js?v=jm-v18-provas-assinatura-seguradoras"></script>
+  <script src="js/google-maps.js?v=jm-v18-provas-assinatura-seguradoras"></script>
+  <script src="js/mapa.js?v=jm-v18-provas-assinatura-seguradoras"></script>
+  <script src="js/app.js?v=jm-v18-provas-assinatura-seguradoras"></script>
 </body>
 </html>
