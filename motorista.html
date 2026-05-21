@@ -48,6 +48,18 @@
           <div id="driverCallsBox"></div>
         </section>
         <section class="panel col-5">
+          <h2>Localização do celular</h2>
+          <p class="muted small">Use quando o guincho estiver sem GPS ou o sinal do rastreador atrasar. A central verá sua posição no mapa enquanto o chamado estiver ativo.</p>
+          <div class="form-grid">
+            <div class="wide"><label>Chamado rastreado pelo celular</label><select id="driverLocationCall"></select></div>
+            <div class="wide actions">
+              <button id="driverStartLocationBtn" class="btn good" type="button">Ativar localização</button>
+              <button id="driverStopLocationBtn" class="btn danger" type="button">Parar localização</button>
+            </div>
+            <div id="driverLocationStatus" class="wide small muted">Localização do celular desligada.</div>
+          </div>
+        </section>
+        <section class="panel col-5">
           <h2>Lançar despesa</h2>
           <form id="driverExpenseForm" class="form-grid">
             <div class="wide"><label>Chamado</label><select id="driverExpenseCall"></select></div>

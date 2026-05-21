@@ -1,12 +1,13 @@
 (function () {
   "use strict";
 
-  const { $, esc, parseMoney, toast, statusClass, routeKm, mapsRouteUrl, statusKey, statusLabel, isFinalStatus } = window.JM.utils;
+  const { $, esc, parseMoney, toast, statusClass, routeKm, mapsRouteUrl, statusKey, statusLabel, isFinalStatus, setupCollapsiblePanels } = window.JM.utils;
   const { auth, db, arrayUnion } = window.JM.firebase;
   const cfg = window.JM_CONFIG || {};
   const DRIVER_FLOW_VERSION = "jm-v18-provas-assinatura-seguradoras";
   const state = { user: null, profile: null, calls: {}, vehicles: {}, expenses: {}, settings: {} };
   const unsubscribers = [];
+  let driverLocationWatchId = null;
   const PROOF_STAGES = ["retirada", "carregamento", "transporte", "entrega", "finalizacao"];
   const REQUIRED_PHOTOS = [
     { key: "front", input: "proofPhotoFront", label: "Frente" },
@@ -321,6 +322,8 @@
   $("driverLogoutBtn").onclick = () => auth.signOut();
   $("driverRefreshBtn").onclick = () => render();
   if ($("driverExpenseCall")) $("driverExpenseCall").onchange = syncDriverExpenseContext;
+  if ($("driverStartLocationBtn")) $("driverStartLocationBtn").onclick = startDriverPhoneLocation;
+  if ($("driverStopLocationBtn")) $("driverStopLocationBtn").onclick = stopDriverPhoneLocation;
 
   function activeCalls() {
     return visibleRows(state.calls).filter((c) => !isFinalStatus(c));
@@ -334,7 +337,7 @@
   }
 
   function renderCalls() {
-    const calls = visibleRows(state.calls).sort((a, b) => String(b.createdAt || "").localeCompare(String(a.createdAt || "")));
+    const calls = activeCalls().sort((a, b) => String(b.createdAt || "").localeCompare(String(a.createdAt || "")));
     $("driverCallsBox").innerHTML = calls.length ? calls.map((call) => {
       const vehicle = state.vehicles[call.vehicleId] || {};
       const url = call.routeExternalUrl || call.routeUrl || mapsRouteUrl(call, vehicle);
@@ -368,9 +371,60 @@
     if (currentCall && state.calls[currentCall]) $("driverExpenseCall").value = currentCall;
     if ($("driverReportCall")) $("driverReportCall").innerHTML = `<option value="">Selecione</option>` + callOptions;
     if ($("driverProofCall")) $("driverProofCall").innerHTML = `<option value="">Selecione</option>` + callOptions;
+    if ($("driverLocationCall")) $("driverLocationCall").innerHTML = `<option value="">Selecione</option>` + callOptions;
     $("driverExpenseVehicle").innerHTML = `<option value="">Selecione</option>` + visibleRows(state.vehicles).map((v) => `<option value="${esc(v.id)}">${esc(v.placa || v.id)}</option>`).join("");
     if (currentVehicle && state.vehicles[currentVehicle]) $("driverExpenseVehicle").value = currentVehicle;
     syncDriverExpenseContext();
+  }
+
+  function setDriverLocationStatus(message, type) {
+    const box = $("driverLocationStatus");
+    if (!box) return;
+    box.textContent = message;
+    box.className = "wide small " + (type || "muted");
+  }
+
+  function stopDriverPhoneLocation() {
+    if (driverLocationWatchId != null && navigator.geolocation) {
+      navigator.geolocation.clearWatch(driverLocationWatchId);
+    }
+    driverLocationWatchId = null;
+    setDriverLocationStatus("Localização do celular desligada.", "muted");
+  }
+
+  async function startDriverPhoneLocation() {
+    if (!navigator.geolocation) return toast("Este celular/navegador não liberou geolocalização.", "danger");
+    const callId = $("driverLocationCall") && $("driverLocationCall").value;
+    const call = callId && state.calls[callId];
+    if (!call) return toast("Selecione um chamado ativo para enviar a localização do celular.", "danger");
+    stopDriverPhoneLocation();
+    setDriverLocationStatus("Solicitando permissão de localização do celular...", "warn");
+    driverLocationWatchId = navigator.geolocation.watchPosition(async (pos) => {
+      const point = {
+        lat: pos.coords.latitude,
+        lng: pos.coords.longitude,
+        accuracy: pos.coords.accuracy || null,
+        source: "driver_phone_geolocation",
+        capturedAt: new Date().toISOString(),
+        driverId: state.user.uid,
+        driverName: state.profile.nome || state.user.email
+      };
+      try {
+        await db.collection("calls").doc(callId).set({
+          driverPhoneLocation: point,
+          mobileLocation: point,
+          phoneLocationActive: true,
+          phoneLocationUpdatedAt: point.capturedAt,
+          updatedAt: point.capturedAt
+        }, { merge: true });
+        setDriverLocationStatus("Localização ativa: " + point.lat.toFixed(6) + ", " + point.lng.toFixed(6) + " · precisão " + Math.round(point.accuracy || 0) + "m", "ok");
+      } catch (err) {
+        setDriverLocationStatus("Falha ao enviar localização: " + (err && err.message || "permissão negada"), "danger");
+      }
+    }, (err) => {
+      setDriverLocationStatus("Autorize a localização do celular para aparecer no mapa: " + err.message, "danger");
+      stopDriverPhoneLocation();
+    }, { enableHighAccuracy: true, timeout: 8000, maximumAge: 10000 });
   }
 
   async function setStatus(id, status) {
@@ -384,9 +438,15 @@
     await db.collection("calls").doc(id).update({
       status: label,
       statusKey: key,
+      closedAt: key === "finalizado" ? new Date().toISOString() : call.closedAt || "",
+      closedBy: key === "finalizado" ? state.user.uid : call.closedBy || "",
+      closedByEmail: key === "finalizado" ? state.user.email : call.closedByEmail || "",
+      locked: key === "finalizado" ? true : call.locked || false,
+      phoneLocationActive: key === "finalizado" ? false : call.phoneLocationActive || false,
       updatedAt: new Date().toISOString(),
       timeline: arrayUnion({ at: new Date().toISOString(), by: state.profile.nome || state.user.email, text: "Motorista alterou status para " + label })
     });
+    if (key === "finalizado") stopDriverPhoneLocation();
     toast("Chamado atualizado.", "ok");
   }
 
@@ -596,5 +656,6 @@
   window.JM = window.JM || {};
   window.JM.motorista = { setStatus, state };
   setupSignaturePad();
+  if (typeof setupCollapsiblePanels === "function") setupCollapsiblePanels(document, { collapseOnMobile: true, openFirst: 1 });
   if ("serviceWorker" in navigator) navigator.serviceWorker.register("service-worker.js?v=" + DRIVER_FLOW_VERSION).catch(() => {});
 }());

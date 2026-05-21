@@ -45,6 +45,7 @@
         <button data-view="dashboard" class="active">Dashboard</button>
         <button data-view="operacao">Central Operacional</button>
         <button data-view="chamados">Chamados</button>
+        <button data-view="finalizados">Finalizados</button>
         <button data-view="clientes">Clientes / Seguradoras</button>
         <button data-view="integracoes">Integrações</button>
         <button data-view="mapa">Mapa / Tracker</button>
@@ -77,6 +78,7 @@
             <div class="card kpi col-3"><span>Receita do mês</span><strong id="kpiRevenue">R$ 0,00</strong></div>
             <div class="card kpi col-3"><span>Despesas pendentes</span><strong id="kpiExpenses">R$ 0,00</strong></div>
             <div class="card kpi col-3"><span>Frota online</span><strong id="kpiOnline">0</strong></div>
+            <div id="dashboardOpsKpis" class="col-12 dash-kpi-grid"></div>
             <div class="panel col-7">
               <h2>Mapa operacional</h2>
               <div id="dashboardMap" class="map"></div>
@@ -229,6 +231,20 @@
             <div class="panel col-7">
               <h2>Chamados em tempo real</h2>
               <div id="callsTable" class="table-wrap"></div>
+            </div>
+            <div class="panel col-12">
+              <h2>Painel do chamado</h2>
+              <div id="callDossierBox" class="call-dossier"></div>
+            </div>
+          </div>
+        </section>
+
+        <section id="view-finalizados" class="view">
+          <div class="grid">
+            <div class="panel col-12">
+              <h2>Chamados finalizados e fechados</h2>
+              <p class="muted small">Chamado finalizado fica travado. Reabertura exige autorização de gestor/gerente e motivo auditado.</p>
+              <div id="finalizedCallsTable" class="table-wrap"></div>
             </div>
           </div>
         </section>
