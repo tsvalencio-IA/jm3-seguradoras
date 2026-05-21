@@ -24,7 +24,7 @@ Esta versão mantém o sistema em frontend estático/GitHub Pages, mas separa me
 1. Suba todos os arquivos desta pasta.
 2. Publique o conteúdo de `firestore.rules` no Firebase Console.
 3. Ative login Email/Senha no Firebase Authentication.
-4. Abra `superadmin.html?v=jm-v17-fluxo-unico-financeiro-operacional`.
+4. Abra `superadmin.html?v=jm-v18-provas-assinatura-seguradoras`.
 5. Entre/crie o primeiro superadmin com `tsvalencio@gmail.com`.
 6. Em Tracker, salve:
    - plataforma: `https://gps2.rafacarrastreadores.com.br`
@@ -35,7 +35,7 @@ Esta versão mantém o sistema em frontend estático/GitHub Pages, mas separa me
    - polling: `30000` ou maior
 7. Em Rastreadores da frota, informe o `deviceId` ou `uniqueId` real do Traccar para a placa correta.
 8. Clique em `Criar base JM` e depois em `Sincronizar Tracker`.
-9. Abra `jm.html?v=jm-v17-fluxo-unico-financeiro-operacional` e entre com `jm@jm.com`.
+9. Abra `jm.html?v=jm-v18-provas-assinatura-seguradoras` e entre com `jm@jm.com`.
 
 ## Device Trackar Validado
 
@@ -121,5 +121,5 @@ A v16 não remove a V14. As rotas por ruas/rodovias continuam usando OSM/OSRM se
 Versão de cache/PWA:
 
 ```txt
-jm-v17-fluxo-unico-financeiro-operacional
+jm-v18-provas-assinatura-seguradoras
 ```

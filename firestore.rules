@@ -133,6 +133,13 @@ service cloud.firestore {
       allow delete: if isOwner();
     }
 
+    match /callProofs/{id} {
+      allow read: if isOffice() || isFinance() || (isDriver() && resource.data.driverId == request.auth.uid);
+      allow create: if (isDriver() && request.resource.data.driverId == request.auth.uid) || canOperateCalls();
+      allow update: if canOperateCalls();
+      allow delete: if isOwner();
+    }
+
     match /maintenance/{id} {
       allow read: if canManageFleet() || isFinance();
       allow create, update: if canManageFleet();

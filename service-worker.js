@@ -1,4 +1,4 @@
-const CACHE_NAME = "jm-guinchos-custos-frota-combustivel-v17-1";
+﻿const CACHE_NAME = "jm-guinchos-v18-1-gps-endereco-paineis";
 const ASSETS = [
   "./",
   "./index.html",
@@ -67,3 +67,4 @@ self.addEventListener("fetch", (event) => {
     })
   );
 });
+

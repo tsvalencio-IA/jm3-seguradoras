@@ -223,9 +223,11 @@
   function callRoutePoints(call, vehicle) {
     const points = [];
     const vehiclePoint = pointFrom(vehicle && vehicle.location);
+    const phonePoint = pointFrom(call && (call.driverPhoneLocation || call.mobileLocation || call.driverLocation));
     const originPoint = pointFrom(call && (call.origem || call.origin));
     const destinationPoint = pointFrom(call && (call.destino || call.destination));
-    if (vehiclePoint) points.push({ label: vehicle && (vehicle.placa || vehicle.apelido) || "Veículo", point: vehiclePoint, kind: "vehicle" });
+    if (phonePoint && (!vehiclePoint || call && call.phoneLocationActive)) points.push({ label: "Celular do motorista", point: phonePoint, kind: "driver_phone" });
+    else if (vehiclePoint) points.push({ label: vehicle && (vehicle.placa || vehicle.apelido) || "Veiculo", point: vehiclePoint, kind: "vehicle" });
     if (originPoint) points.push({ label: call && (call.originLabel || call.origem && call.origem.label) || "Origem", point: originPoint, kind: "origin" });
     (call && Array.isArray(call.routeWaypoints) ? call.routeWaypoints : []).forEach((row, index) => {
       const wp = normalizeWaypoint(row, index);
@@ -324,12 +326,70 @@
     return "muted";
   }
 
+  function setupCollapsiblePanels(root, options) {
+    const scope = typeof root === "string" ? document.querySelector(root) : root || document;
+    if (!scope) return;
+    const cfg = Object.assign({ collapseOnMobile: true, openFirst: 1 }, options || {});
+    const mobile = window.matchMedia && window.matchMedia("(max-width: 760px)").matches;
+    $all(".panel", scope).forEach((panel, index) => {
+      if (!panel) return;
+      if (panel.dataset.collapsibleReady === "1") {
+        const button = panel.querySelector(".panel-collapse-toggle");
+        const body = panel.querySelector(".panel-collapse-body");
+        if (button && body) {
+          const collapsed = panel.classList.contains("is-collapsed") || body.hidden;
+          button.textContent = collapsed ? "Maximizar" : "Minimizar";
+          button.setAttribute("aria-expanded", String(!collapsed));
+        }
+        return;
+      }
+      const title = Array.from(panel.children).find((child) => child && child.tagName === "H2")
+        || panel.querySelector("h2");
+      if (!title) return;
+      const body = document.createElement("div");
+      body.className = "panel-collapse-body";
+      let node = title.nextSibling;
+      while (node) {
+        const next = node.nextSibling;
+        body.appendChild(node);
+        node = next;
+      }
+      const head = document.createElement("div");
+      head.className = "panel-collapse-head";
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "btn panel-collapse-toggle";
+      button.setAttribute("aria-label", "Maximizar ou minimizar " + title.textContent.trim());
+      button.setAttribute("title", "Maximizar ou minimizar");
+      head.appendChild(title);
+      head.appendChild(button);
+      panel.insertBefore(head, panel.firstChild);
+      panel.appendChild(body);
+      panel.classList.add("collapsible-panel");
+      panel.dataset.collapsibleReady = "1";
+      const setCollapsed = (collapsed) => {
+        panel.classList.toggle("is-collapsed", collapsed);
+        panel.classList.toggle("collapsed", collapsed);
+        body.hidden = collapsed;
+        button.textContent = collapsed ? "Maximizar" : "Minimizar";
+        button.setAttribute("aria-expanded", String(!collapsed));
+      };
+      button.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        setCollapsed(!(panel.classList.contains("is-collapsed") || body.hidden));
+      });
+      setCollapsed(mobile && cfg.collapseOnMobile && index >= Number(cfg.openFirst || 0));
+    });
+  }
+
   window.JM = window.JM || {};
   window.JM.utils = {
     $, $all, esc, money, parseMoney, dateTime, todayInput, slug, plateKey,
     isValidPlate, digits, maskPhone, phoneWhatsappUrl, maskCpf, maskCnpj, validateCpf, validateCnpj,
     STATUS_DEFS, statusKey, statusLabel, isFinalStatus,
     uidSafe, coords, pointFrom, isPoint, roundPoint, haversineKm, callRoutePoints,
-    routeKm, geometryToFirestore, geometryToGeoJson, geoJsonToLatLngs, geometryKm, mapsRouteUrl, normalizeUrl, toast, statusClass
+    routeKm, geometryToFirestore, geometryToGeoJson, geoJsonToLatLngs, geometryKm, mapsRouteUrl, normalizeUrl, toast, statusClass,
+    setupCollapsiblePanels
   };
 }());

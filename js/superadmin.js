@@ -232,10 +232,12 @@
 
   $("superGoogleMapsForm").onsubmit = async (e) => {
     e.preventDefault();
+    const apiKey = $("superGoogleMapsKey").value.trim();
     await db.collection("settings").doc("integrations").set({
       map: {
-        provider: "leaflet_osm",
-        paidApi: false,
+        provider: apiKey ? "google_maps_optional" : "leaflet_osm",
+        paidApi: !!apiKey,
+        apiKey,
         language: $("superGoogleMapsLanguage").value.trim() || "pt-BR",
         region: $("superGoogleMapsRegion").value.trim() || "BR",
         country: "br",
@@ -248,7 +250,7 @@
       },
       updatedAt: new Date().toISOString()
     }, { merge: true });
-    toast("Mapa gratuito salvo. O jm.html usará link/coordenadas e rota inteligente sem API paga.", "ok");
+    toast(apiKey ? "Google Maps opcional salvo. O sistema usara Places/Geocoding quando disponivel e mantem fallback gratuito." : "Mapa gratuito salvo. O sistema usara OpenStreetMap/OSRM e Nominatim sem API paga.", "ok");
   };
 
   function normalizedRole(role) {
@@ -339,5 +341,10 @@
       toast(friendlyAuthError(err), "danger");
     }
   };
+
+  if (window.JM.utils && typeof window.JM.utils.setupCollapsiblePanels === "function") {
+    window.JM.utils.setupCollapsiblePanels(document, { collapseOnMobile: true, openFirst: 2 });
+    setTimeout(() => window.JM.utils.setupCollapsiblePanels(document, { collapseOnMobile: true, openFirst: 2 }), 250);
+  }
 
 }());
